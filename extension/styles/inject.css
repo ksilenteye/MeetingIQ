@@ -1,0 +1,19 @@
+/* Optional on-page status dot when capture is active */
+#meet-transcript-mt-indicator {
+  position: fixed;
+  bottom: 12px;
+  right: 12px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #2e4e7e;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.85);
+  z-index: 2147483646;
+  pointer-events: none;
+  opacity: 0.85;
+}
+
+#meet-transcript-mt-indicator.meet-transcript-mt-off {
+  background: #888;
+  opacity: 0.45;
+}
