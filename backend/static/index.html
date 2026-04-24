@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Live Meet Transcript</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { font-family: Arial, sans-serif; margin: 0; background: #0f1115; color: #e8e8e8; }
+      .wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
+      h1 { margin: 0 0 12px; font-size: 22px; }
+      .toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+      input, button, select, textarea {
+        background: #191d24; color: #e8e8e8; border: 1px solid #2f3845; border-radius: 6px; padding: 8px;
+      }
+      button { cursor: pointer; }
+      .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; }
+      .panel { border: 1px solid #2f3845; border-radius: 10px; background: #13171d; min-height: 520px; }
+      .panel h2 { margin: 0; padding: 12px; border-bottom: 1px solid #2f3845; font-size: 16px; }
+      #liveList { height: 520px; overflow: auto; padding: 10px; }
+      .line { padding: 8px; border-bottom: 1px dashed #2b313d; }
+      .meta { color: #9da7b7; font-size: 12px; margin-bottom: 4px; }
+      .speaker { color: #7fc0ff; font-weight: bold; }
+      .text { line-height: 1.35; white-space: pre-wrap; }
+      .llmBody { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+      #llmResult { min-height: 260px; white-space: pre-wrap; line-height: 1.4; }
+      #chatHistory { max-height: 180px; overflow: auto; border-top: 1px dashed #2b313d; padding-top: 8px; }
+      .chatItem { padding: 8px; border-bottom: 1px dashed #2b313d; }
+      .chatMeta { color: #9da7b7; font-size: 12px; margin-bottom: 4px; }
+      .status { color: #9da7b7; font-size: 12px; margin-top: 8px; }
+      .keyRow { display: flex; flex-direction: column; gap: 4px; }
+      .keyRow label { font-size: 12px; color: #9da7b7; }
+      .hint { font-size: 11px; color: #7a8494; }
+      @media (max-width: 960px) { .grid { grid-template-columns: 1fr; } .panel { min-height: auto; } #liveList { height: 380px; } }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Meet Transcript Dashboard</h1>
+      <div class="toolbar">
+        <input id="meetingId" placeholder="meeting id (e.g. jrf-ttqe-dxu)" />
+        <select id="meetingSelect"><option value="">Select meeting from DB</option></select>
+        <button id="loadBtn">Load</button>
+        <button id="clearBtn">Clear UI</button>
+      </div>
+
+      <div class="grid">
+        <section class="panel">
+          <h2>1. Live Transcript</h2>
+          <div id="liveList"></div>
+        </section>
+
+        <section class="panel">
+          <h2>2. LLM Action</h2>
+          <div class="llmBody">
+            <label class="hint">LLM provider (OpenAI / Groq / Gemini)</label>
+            <select id="llmProvider"></select>
+            <input id="modelName" placeholder="Optional model override (e.g. gpt-4o-mini, llama-3.3-70b-versatile, gemini-2.0-flash)" />
+            <div class="keyRow" id="keyOpenaiRow">
+              <label for="keyOpenai">OpenAI API key</label>
+              <input id="keyOpenai" type="password" autocomplete="off" placeholder="sk-..." />
+            </div>
+            <div class="keyRow" id="keyGroqRow">
+              <label for="keyGroq">Groq API key</label>
+              <input id="keyGroq" type="password" autocomplete="off" placeholder="gsk_..." />
+            </div>
+            <div class="keyRow" id="keyGeminiRow">
+              <label for="keyGemini">Google AI (Gemini) API key</label>
+              <input id="keyGemini" type="password" autocomplete="off" placeholder="AIza..." />
+            </div>
+            <label class="hint"><input type="checkbox" id="allowFallback" checked /> Allow heuristic fallback if no API key</label>
+            <select id="actionType">
+              <option value="summarize">Summarize</option>
+              <option value="qa">Q&A</option>
+            </select>
+            <textarea id="question" rows="4" placeholder="Ask a question for Q&A..."></textarea>
+            <button id="runBtn">Run Action</button>
+            <div id="llmResult">Result appears here.</div>
+            <div id="chatHistory"></div>
+            <div id="status" class="status">Idle</div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <script>
+      const meetingInput = document.getElementById("meetingId");
+      const liveList = document.getElementById("liveList");
+      const statusEl = document.getElementById("status");
+      const llmResult = document.getElementById("llmResult");
+      const actionType = document.getElementById("actionType");
+      const questionEl = document.getElementById("question");
+      const meetingSelect = document.getElementById("meetingSelect");
+      const chatHistoryEl = document.getElementById("chatHistory");
+      const llmProviderEl = document.getElementById("llmProvider");
+      const modelNameEl = document.getElementById("modelName");
+      const keyOpenai = document.getElementById("keyOpenai");
+      const keyGroq = document.getElementById("keyGroq");
+      const keyGemini = document.getElementById("keyGemini");
+      const allowFallbackEl = document.getElementById("allowFallback");
+      let activeMeetingId = "";
+      let ws = null;
+      let keepAliveTimer = null;
+
+      const LS = { openai: "llm_key_openai", groq: "llm_key_groq", gemini: "llm_key_gemini", provider: "llm_provider_id" };
+
+      function loadKeysFromStorage() {
+        keyOpenai.value = localStorage.getItem(LS.openai) || "";
+        keyGroq.value = localStorage.getItem(LS.groq) || "";
+        keyGemini.value = localStorage.getItem(LS.gemini) || "";
+        const savedP = localStorage.getItem(LS.provider);
+        if (savedP) llmProviderEl.value = savedP;
+      }
+
+      function saveKeyField(which, value) {
+        if (which === "openai") localStorage.setItem(LS.openai, value);
+        if (which === "groq") localStorage.setItem(LS.groq, value);
+        if (which === "gemini") localStorage.setItem(LS.gemini, value);
+      }
+
+      function updateKeyVisibility() {
+        const p = llmProviderEl.value;
+        document.getElementById("keyOpenaiRow").style.display = p === "openai" ? "flex" : "none";
+        document.getElementById("keyGroqRow").style.display = p === "groq" ? "flex" : "none";
+        document.getElementById("keyGeminiRow").style.display = p === "gemini" ? "flex" : "none";
+      }
+
+      async function loadLlmProviders() {
+        const res = await fetch("/api/llm/providers");
+        const data = await res.json();
+        llmProviderEl.innerHTML = "";
+        (data.items || []).forEach((p) => {
+          const opt = document.createElement("option");
+          opt.value = p.id;
+          opt.textContent = `${p.label} (default: ${p.default_model || "n/a"})`;
+          llmProviderEl.appendChild(opt);
+        });
+        loadKeysFromStorage();
+        updateKeyVisibility();
+      }
+
+      function setStatus(msg) { statusEl.textContent = msg; }
+
+      function addLine(item) {
+        const div = document.createElement("div");
+        div.className = "line";
+        div.innerHTML = `
+          <div class="meta">${item.timestamp || ""}</div>
+          <div class="text"><span class="speaker">${item.speaker || "Unknown"}:</span> ${item.text || ""}</div>
+        `;
+        liveList.appendChild(div);
+        liveList.scrollTop = liveList.scrollHeight;
+      }
+
+      function addChatHistory(item) {
+        const div = document.createElement("div");
+        div.className = "chatItem";
+        const meta = [item.created_at || "", item.action || "", item.provider || "", item.used_llm ? "LLM" : "fallback"].filter(Boolean).join(" | ");
+        div.innerHTML = `
+          <div class="chatMeta">${meta}</div>
+          ${item.question ? `<div><strong>Q:</strong> ${item.question}</div>` : ""}
+          <div><strong>A:</strong> ${item.result || ""}</div>
+        `;
+        chatHistoryEl.appendChild(div);
+        chatHistoryEl.scrollTop = chatHistoryEl.scrollHeight;
+      }
+
+      async function loadHistory() {
+        if (!activeMeetingId) return;
+        liveList.innerHTML = "";
+        const res = await fetch(`/api/transcripts?meeting_id=${encodeURIComponent(activeMeetingId)}&limit=500`);
+        const data = await res.json();
+        (data.items || []).forEach(addLine);
+        await loadChatHistory();
+        setStatus(`Loaded ${data.items?.length || 0} stored transcript rows`);
+      }
+
+      async function loadMeetings() {
+        const res = await fetch("/api/meetings?limit=200");
+        const data = await res.json();
+        const current = meetingSelect.value;
+        meetingSelect.innerHTML = `<option value="">Select meeting from DB</option>`;
+        (data.items || []).forEach((m) => {
+          const opt = document.createElement("option");
+          opt.value = m.meeting_id;
+          opt.textContent = `${m.meeting_id} (${m.item_count})`;
+          meetingSelect.appendChild(opt);
+        });
+        if (current) meetingSelect.value = current;
+      }
+
+      async function loadChatHistory() {
+        if (!activeMeetingId) return;
+        chatHistoryEl.innerHTML = "";
+        const res = await fetch(`/api/llm/history?meeting_id=${encodeURIComponent(activeMeetingId)}&limit=100`);
+        const data = await res.json();
+        (data.items || []).forEach(addChatHistory);
+      }
+
+      function connectWs() {
+        if (ws) ws.close();
+        if (keepAliveTimer) clearInterval(keepAliveTimer);
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        ws = new WebSocket(`${proto}://${location.host}/ws/transcripts`);
+        ws.onopen = () => setStatus("WebSocket connected");
+        ws.onerror = () => setStatus("WebSocket error");
+        ws.onclose = () => {
+          setStatus("WebSocket closed, retrying...");
+          setTimeout(connectWs, 1200);
+        };
+        ws.onmessage = (evt) => {
+          const msg = JSON.parse(evt.data || "{}");
+          if (msg.type !== "transcript_batch") return;
+          if (!activeMeetingId || msg.meeting_id !== activeMeetingId) return;
+          (msg.items || []).forEach(addLine);
+        };
+        // keepalive pings so server receive loop remains active
+        keepAliveTimer = setInterval(() => { if (ws && ws.readyState === 1) ws.send("ping"); }, 10000);
+      }
+
+      function currentApiKey() {
+        const p = llmProviderEl.value;
+        if (p === "openai") return keyOpenai.value.trim();
+        if (p === "groq") return keyGroq.value.trim();
+        if (p === "gemini") return keyGemini.value.trim();
+        return "";
+      }
+
+      async function runLlmAction() {
+        if (!activeMeetingId) {
+          setStatus("Set meeting id first");
+          return;
+        }
+        const payload = {
+          meeting_id: activeMeetingId,
+          action: actionType.value,
+          question: questionEl.value.trim() || null,
+          provider: llmProviderEl.value,
+          api_key: currentApiKey() || null,
+          model: modelNameEl.value.trim() || null,
+          allow_fallback: allowFallbackEl.checked,
+        };
+        const res = await fetch("/api/llm/action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        llmResult.textContent = data.result || "No result";
+        addChatHistory({
+          created_at: new Date().toISOString(),
+          action: payload.action,
+          question: payload.question,
+          result: data.result || "No result",
+          provider: data.provider,
+          used_llm: data.used_llm,
+        });
+        setStatus(`Done: ${payload.action} | ${data.used_llm ? "LLM" : "fallback/heuristic"}`);
+      }
+
+      document.getElementById("loadBtn").addEventListener("click", async () => {
+        activeMeetingId = meetingInput.value.trim();
+        if (!activeMeetingId) {
+          setStatus("Enter a meeting id");
+          return;
+        }
+        await loadHistory();
+      });
+      keyOpenai.addEventListener("change", () => saveKeyField("openai", keyOpenai.value));
+      keyGroq.addEventListener("change", () => saveKeyField("groq", keyGroq.value));
+      keyGemini.addEventListener("change", () => saveKeyField("gemini", keyGemini.value));
+      llmProviderEl.addEventListener("change", () => {
+        localStorage.setItem(LS.provider, llmProviderEl.value);
+        updateKeyVisibility();
+      });
+
+      meetingSelect.addEventListener("change", async () => {
+        if (!meetingSelect.value) return;
+        meetingInput.value = meetingSelect.value;
+        activeMeetingId = meetingSelect.value;
+        await loadHistory();
+      });
+      document.getElementById("runBtn").addEventListener("click", runLlmAction);
+      document.getElementById("clearBtn").addEventListener("click", () => {
+        liveList.innerHTML = "";
+        chatHistoryEl.innerHTML = "";
+      });
+
+      connectWs();
+      loadMeetings();
+      loadLlmProviders();
+      setInterval(loadMeetings, 10000);
+      setStatus("Ready");
+    </script>
+  </body>
+</html>
