@@ -1,0 +1,229 @@
+
+<h2 class="sr-only">Interactive node-link knowledge graph of the Meet Transcript project, showing entities and their relationships</h2>
+<canvas id="kg" style="width:100%;display:block;"></canvas>
+<div id="tooltip" style="position:absolute;pointer-events:none;display:none;background:var(--color-background-primary);border:0.5px solid var(--color-border-secondary);border-radius:8px;padding:6px 10px;font-size:12px;color:var(--color-text-primary);max-width:180px;line-height:1.4;"></div>
+<div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:12px;font-size:12px;color:var(--color-text-secondary);">
+  <span style="display:flex;align-items:center;gap:5px;"><span style="width:12px;height:12px;border-radius:50%;background:#1D9E75;display:inline-block;"></span>Extension</span>
+  <span style="display:flex;align-items:center;gap:5px;"><span style="width:12px;height:12px;border-radius:50%;background:#7F77DD;display:inline-block;"></span>Backend / API</span>
+  <span style="display:flex;align-items:center;gap:5px;"><span style="width:12px;height:12px;border-radius:50%;background:#D85A30;display:inline-block;"></span>LLM layer</span>
+  <span style="display:flex;align-items:center;gap:5px;"><span style="width:12px;height:12px;border-radius:50%;background:#378ADD;display:inline-block;"></span>RAG pipeline</span>
+  <span style="display:flex;align-items:center;gap:5px;"><span style="width:12px;height:12px;border-radius:50%;background:#888780;display:inline-block;"></span>Storage</span>
+  <span style="display:flex;align-items:center;gap:5px;"><span style="width:12px;height:12px;border-radius:50%;background:#D4537E;display:inline-block;"></span>Concept</span>
+</div>
+<script>
+const W = 680, H = 700;
+const canvas = document.getElementById('kg');
+canvas.width = W * devicePixelRatio;
+canvas.height = H * devicePixelRatio;
+canvas.style.height = H + 'px';
+const ctx = canvas.getContext('2d');
+ctx.scale(devicePixelRatio, devicePixelRatio);
+
+const dark = matchMedia('(prefers-color-scheme:dark)').matches;
+const textCol = dark ? '#c2c0b6' : '#2C2C2A';
+const edgeCol = dark ? '#5F5E5A' : '#B4B2A9';
+const labelBg = dark ? '#2C2C2A' : '#ffffff';
+
+const COLORS = {
+  ext:     { fill:'#9FE1CB', stroke:'#0F6E56', text:'#085041' },
+  backend: { fill:'#CECBF6', stroke:'#534AB7', text:'#3C3489' },
+  llm:     { fill:'#F5C4B3', stroke:'#993C1D', text:'#712B13' },
+  rag:     { fill:'#B5D4F4', stroke:'#185FA5', text:'#0C447C' },
+  store:   { fill:'#D3D1C7', stroke:'#5F5E5A', text:'#444441' },
+  concept: { fill:'#F4C0D1', stroke:'#993556', text:'#72243E' },
+};
+
+const nodes = [
+  { id:'meet',        label:'Google\nMeet',      type:'concept', r:34, x:100, y:80  },
+  { id:'ext',         label:'Chrome\nExtension', type:'ext',     r:40, x:100, y:210 },
+  { id:'content',     label:'content.js',        type:'ext',     r:28, x:220, y:130 },
+  { id:'background',  label:'background\n.js',   type:'ext',     r:28, x:230, y:270 },
+  { id:'backend',     label:'FastAPI\nmain.py',  type:'backend', r:42, x:390, y:210 },
+  { id:'ws',          label:'WebSocket\nhub',    type:'backend', r:28, x:530, y:130 },
+  { id:'llmaction',   label:'/api/llm\n/action', type:'backend', r:28, x:530, y:280 },
+  { id:'service',     label:'service.py',        type:'llm',     r:30, x:530, y:410 },
+  { id:'registry',    label:'LLM\nregistry',     type:'llm',     r:28, x:390, y:470 },
+  { id:'openai_p',    label:'OpenAI',            type:'llm',     r:24, x:280, y:540 },
+  { id:'groq_p',      label:'Groq',              type:'llm',     r:24, x:390, y:560 },
+  { id:'gemini_p',    label:'Gemini',            type:'llm',     r:24, x:500, y:540 },
+  { id:'sqlite',      label:'SQLite\n.db',       type:'store',   r:36, x:200, y:400 },
+  { id:'transcripts', label:'transcripts\ntable',type:'store',   r:26, x:80,  y:490 },
+  { id:'llmhist',     label:'llm_history\ntable',type:'store',   r:26, x:200, y:510 },
+  { id:'ragchunks',   label:'rag_chunks\ntable', type:'store',   r:26, x:320, y:490 },
+  { id:'ragstate',    label:'rag_state\ntable',  type:'store',   r:24, x:110, y:590 },
+  { id:'processor',   label:'Processor',         type:'rag',     r:28, x:390, y:340 },
+  { id:'embedder',    label:'Embedder\nMiniLM',  type:'rag',     r:28, x:260, y:340 },
+  { id:'vectordb',    label:'VectorDB\nFAISS',   type:'rag',     r:28, x:260, y:460 },
+  { id:'retriever',   label:'Retriever',         type:'rag',     r:26, x:130, y:340 },
+  { id:'buffer',      label:'ShortTerm\nBuffer', type:'rag',     r:26, x:550, y:560 },
+  { id:'summarizer',  label:'Rolling\nSummarizer',type:'rag',    r:26, x:620, y:430 },
+  { id:'router',      label:'Query\nRouter',     type:'rag',     r:26, x:620, y:340 },
+  { id:'llmclient',   label:'LlmClient\ngpt-4o-mini',type:'llm', r:28, x:620, y:220 },
+];
+
+const edges = [
+  { s:'meet',       t:'ext',        label:'USED_BY'     },
+  { s:'ext',        t:'content',    label:'CONTAINS'    },
+  { s:'ext',        t:'background', label:'CONTAINS'    },
+  { s:'content',    t:'meet',       label:'SCRAPES'     },
+  { s:'background', t:'backend',   label:'POST /transcript' },
+  { s:'backend',    t:'ws',         label:'BROADCASTS'  },
+  { s:'backend',    t:'llmaction',  label:'ROUTES'      },
+  { s:'backend',    t:'sqlite',     label:'READS/WRITES' },
+  { s:'llmaction',  t:'service',    label:'CALLS'       },
+  { s:'llmaction',  t:'ragchunks',  label:'RAG_CONTEXT' },
+  { s:'service',    t:'registry',   label:'USES'        },
+  { s:'registry',   t:'openai_p',   label:'PROVIDES'    },
+  { s:'registry',   t:'groq_p',     label:'PROVIDES'    },
+  { s:'registry',   t:'gemini_p',   label:'PROVIDES'    },
+  { s:'sqlite',     t:'transcripts',label:'HAS_TABLE'   },
+  { s:'sqlite',     t:'llmhist',    label:'HAS_TABLE'   },
+  { s:'sqlite',     t:'ragchunks',  label:'HAS_TABLE'   },
+  { s:'sqlite',     t:'ragstate',   label:'HAS_TABLE'   },
+  { s:'backend',    t:'processor',  label:'RUNS'        },
+  { s:'processor',  t:'embedder',   label:'USES'        },
+  { s:'processor',  t:'vectordb',   label:'STORES_INTO' },
+  { s:'processor',  t:'ragchunks',  label:'PERSISTS_TO' },
+  { s:'embedder',   t:'vectordb',   label:'FEEDS'       },
+  { s:'retriever',  t:'embedder',   label:'USES'        },
+  { s:'retriever',  t:'vectordb',   label:'SEARCHES'    },
+  { s:'router',     t:'buffer',     label:'ROUTES_TO'   },
+  { s:'router',     t:'summarizer', label:'ROUTES_TO'   },
+  { s:'router',     t:'retriever',  label:'ROUTES_TO'   },
+  { s:'llmclient',  t:'router',     label:'GETS_CTX'    },
+  { s:'ragstate',   t:'processor',  label:'CURSOR_FOR'  },
+  { s:'ragchunks',  t:'vectordb',   label:'LOADS_INTO'  },
+];
+
+function nodeById(id) { return nodes.find(n=>n.id===id); }
+
+function drawArrow(x1,y1,x2,y2,r1,r2,color){
+  const dx=x2-x1, dy=y2-y1, len=Math.sqrt(dx*dx+dy*dy);
+  if(len<1) return;
+  const ux=dx/len, uy=dy/len;
+  const sx=x1+ux*r1, sy=y1+uy*r1;
+  const ex=x2-ux*(r2+8), ey=y2-uy*(r2+8);
+  ctx.beginPath();
+  ctx.moveTo(sx,sy);
+  ctx.lineTo(ex,ey);
+  ctx.strokeStyle=color;
+  ctx.lineWidth=1;
+  ctx.stroke();
+  const angle=Math.atan2(ey-sy,ex-sx);
+  ctx.beginPath();
+  ctx.moveTo(ex,ey);
+  ctx.lineTo(ex-8*Math.cos(angle-0.4),ey-8*Math.sin(angle-0.4));
+  ctx.lineTo(ex-8*Math.cos(angle+0.4),ey-8*Math.sin(angle+0.4));
+  ctx.closePath();
+  ctx.fillStyle=color;
+  ctx.fill();
+}
+
+function drawEdgeLabel(x1,y1,x2,y2,label){
+  const mx=(x1+x2)/2, my=(y1+y2)/2;
+  ctx.font='10px sans-serif';
+  const tw=ctx.measureText(label).width;
+  ctx.fillStyle=labelBg;
+  ctx.fillRect(mx-tw/2-3,my-7,tw+6,14);
+  ctx.fillStyle=edgeCol;
+  ctx.textAlign='center';
+  ctx.textBaseline='middle';
+  ctx.fillText(label,mx,my);
+}
+
+function drawNode(n){
+  const c=COLORS[n.type];
+  ctx.beginPath();
+  ctx.arc(n.x,n.y,n.r,0,Math.PI*2);
+  ctx.fillStyle=c.fill;
+  ctx.fill();
+  ctx.strokeStyle=c.stroke;
+  ctx.lineWidth=1.5;
+  ctx.stroke();
+
+  const lines=n.label.split('\n');
+  ctx.fillStyle=c.text;
+  ctx.textAlign='center';
+  ctx.textBaseline='middle';
+  const lh=13;
+  const startY=n.y-(lines.length-1)*lh/2;
+  lines.forEach((line,i)=>{
+    ctx.font=lines.length>1?'10px sans-serif':'11px sans-serif';
+    ctx.fillText(line,n.x,startY+i*lh);
+  });
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  edges.forEach(e=>{
+    const s=nodeById(e.s), t=nodeById(e.t);
+    if(!s||!t) return;
+    drawArrow(s.x,s.y,t.x,t.y,s.r,t.r,edgeCol);
+    drawEdgeLabel(s.x,s.y,t.x,t.y,e.label);
+  });
+  nodes.forEach(drawNode);
+}
+
+draw();
+
+const tip=document.getElementById('tooltip');
+const descriptions={
+  meet:'Google Meet — the source of live captions that the extension scrapes.',
+  ext:'Chrome extension (MV3) — orchestrates caption scraping and relay to backend.',
+  content:'content.js — observes the Meet DOM for caption elements in real time.',
+  background:'background.js — batches captions and POSTs them to FastAPI every few seconds.',
+  backend:'FastAPI main.py — central hub: REST + WebSocket, RAG orchestration, DB access.',
+  ws:'WebSocket TranscriptHub — broadcasts new caption batches to open browser tabs.',
+  llmaction:'/api/llm/action — triggers summarize or Q&A; use_rag_context flag enables RAG path.',
+  service:'service.py — run_llm_action(); picks provider, formats prompt, handles fallback.',
+  registry:'LLM registry — singleton map of provider id → BaseLLMProvider instance.',
+  openai_p:'OpenAI provider — calls GPT models via OpenAI SDK.',
+  groq_p:'Groq provider — calls Llama/Mixtral via Groq API.',
+  gemini_p:'Gemini provider — calls Google AI via Gemini API.',
+  sqlite:'SQLite transcripts.db — single file storing all project data.',
+  transcripts:'transcripts table — stores every caption row: meeting_id, speaker, text, ts.',
+  llmhist:'llm_history table — logs every LLM action result with provider and model.',
+  ragchunks:'rag_chunks table — persists chunk text + embedding JSON across restarts.',
+  ragstate:'rag_state table — stores last_transcript_id cursor so ingest resumes correctly.',
+  processor:'Processor — reads new rows, cleans, chunks, embeds, feeds VectorDB + buffer.',
+  embedder:'Embedder — sentence-transformers MiniLM-L6-v2 (hash fallback if unavailable).',
+  vectordb:'VectorDB — in-memory FAISS index (numpy fallback); rehydrated from rag_chunks on startup.',
+  retriever:'Retriever — embeds query → searches VectorDB → returns top-K chunk texts.',
+  buffer:'ShortTermBuffer — sliding 90s deque of recent caption lines for recency queries.',
+  summarizer:'RollingSummarizer — compresses older context from 4000 → 1200 chars.',
+  router:'QueryRouter — keyword-routes query to buffer, summary, or retrieval path.',
+  llmclient:'LlmClient — single-turn OpenAI gpt-4o-mini call; no history; prompt_builder assembles context.',
+};
+
+canvas.addEventListener('mousemove',e=>{
+  const rect=canvas.getBoundingClientRect();
+  const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+  let hit=null;
+  for(const n of nodes){
+    const dx=mx-n.x, dy=my-n.y;
+    if(Math.sqrt(dx*dx+dy*dy)<n.r){ hit=n; break; }
+  }
+  if(hit){
+    canvas.style.cursor='pointer';
+    tip.style.display='block';
+    tip.style.left=(e.clientX-rect.left+14)+'px';
+    tip.style.top=(e.clientY-rect.top-10)+'px';
+    tip.textContent=descriptions[hit.id]||hit.label;
+  } else {
+    canvas.style.cursor='default';
+    tip.style.display='none';
+  }
+});
+canvas.addEventListener('click',e=>{
+  const rect=canvas.getBoundingClientRect();
+  const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+  for(const n of nodes){
+    const dx=mx-n.x, dy=my-n.y;
+    if(Math.sqrt(dx*dx+dy*dy)<n.r){
+      sendPrompt('Tell me more about '+n.label.replace('\n',' ')+' in the Meet Transcript project');
+      break;
+    }
+  }
+});
+canvas.addEventListener('mouseleave',()=>{ tip.style.display='none'; });
+</script>
