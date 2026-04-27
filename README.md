@@ -106,7 +106,7 @@ meet-transcript/
 ### 1. Clone
 
 ```bash
-git clone https://github.com/your-username/meet-transcript.git
+git clone https://github.com/ksilenteye/MeetingIQ/.git
 cd meet-transcript
 ```
 
@@ -353,8 +353,7 @@ pip install groq                    # Groq provider (uses openai SDK with custom
 - [ ] Speaker time-series analytics in dashboard
 - [ ] Export transcript + summary as PDF / DOCX
 - [ ] Docker Compose setup for one-command deployment
-- [ ] Support for additional LLM providers (Anthropic Claude, Mistral)
-
+- [ ] Support for additional LLM providers 
 ---
 
 ## 🤝 Contributing
