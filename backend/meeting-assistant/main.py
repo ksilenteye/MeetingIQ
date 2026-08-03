@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from config import (
     TOP_K,
     TRANSCRIPT_DB_PATH,
     TRANSCRIPT_TABLE,
+    resolve_min_score,
 )
 from db.sqlite_reader import SQLiteTranscriptReader
 from embedding.embedder import Embedder
@@ -25,6 +27,8 @@ from processing.processor import Processor
 from query.router import route_query
 from retrieval.retriever import Retriever
 
+logger = logging.getLogger("meeting_assistant")
+
 
 def build_system() -> tuple[Processor, ShortTermBuffer, RollingSummarizer, Retriever, LlmClient]:
     db_path = str((Path(__file__).resolve().parent / TRANSCRIPT_DB_PATH).resolve())
@@ -34,7 +38,14 @@ def build_system() -> tuple[Processor, ShortTermBuffer, RollingSummarizer, Retri
     vectordb = VectorDB(dim=embedder.dim)
     summarizer = RollingSummarizer(SUMMARY_MAX_CHARS, SUMMARY_TARGET_CHARS)
     processor = Processor(reader, buffer, embedder, vectordb, summarizer)
-    retriever = Retriever(embedder, vectordb)
+    min_score = resolve_min_score(embedder.is_semantic)
+    if not embedder.is_semantic:
+        logger.warning(
+            "sentence-transformers unavailable; using the hash fallback embedder "
+            "(similarity threshold %.2f)",
+            min_score,
+        )
+    retriever = Retriever(embedder, vectordb, min_score=min_score)
     llm = LlmClient(api_key=OPENAI_API_KEY)
     return processor, buffer, summarizer, retriever, llm
 
@@ -45,6 +56,7 @@ def answer_query(
     summarizer: RollingSummarizer,
     retriever: Retriever,
     llm: LlmClient,
+    meeting_id: str | None = None,
 ) -> str:
     route = route_query(query)
     if route == "buffer":
@@ -52,7 +64,7 @@ def answer_query(
     elif route == "summary":
         context = f"{summarizer.get()}\n\nRecent:\n{buffer.recent_text()}"
     else:
-        hits = retriever.search(query, top_k=TOP_K)
+        hits = retriever.search(query, top_k=TOP_K, meeting_id=meeting_id)
         context = "\n---\n".join(hits)
 
     prompt = build_prompt(context=context, question=query)

@@ -1,6 +1,21 @@
-fastapi>=0.110.0
-uvicorn[standard]>=0.29.0
-pydantic>=2.6.0
-openai>=1.40.0
-google-generativeai>=0.8.0
-graphiti-core>=0.28.2
+# Upper bounds are deliberate: Render rebuilds on every push to main, and a
+# surprise major release should not be able to break a deploy at the worst moment.
+fastapi>=0.115.0,<0.142.0
+uvicorn[standard]>=0.30.0,<0.53.0
+pydantic>=2.9.0,<3.0.0
+numpy>=1.26.0,<3.0.0
+openai>=1.40.0,<3.0.0
+
+# Imported lazily inside GeminiProvider.complete(), so it costs nothing at startup
+# unless a visitor actually picks Gemini. Pinned exactly because the package is
+# frozen upstream (superseded by google-genai).
+google-generativeai==0.8.6
+
+# NOT INSTALLED ON PURPOSE:
+#   sentence-transformers  — pulls PyTorch, which does not fit in Render's 512 MB.
+#   faiss-cpu              — the numpy fallback is faster at this corpus size.
+# Both have silent try/except fallbacks already (embedding/embedder.py,
+# memory/vectordb.py). Adding either will OOM the free instance.
+#
+# graphiti-core was removed: it was imported only to set a boolean in /health and
+# dragged in neo4j, posthog and tenacity for no functional gain.

@@ -1,0 +1,60 @@
+# Render Blueprint (Infrastructure as Code) — MeetingIQ
+#
+# Free tier, single instance, ephemeral disk. backend/transcripts.db ships in the
+# repo and re-seeds the demo meetings on every cold start; anything captured live
+# is lost on the next spin-down. That is intentional for this portfolio demo.
+#
+# HARD CONSTRAINT: exactly one process, exactly one worker.
+#   - the meeting-assistant VectorDB is in-memory per process (memory/vectordb.py)
+#   - assistant_ingest_loop() (backend/main.py) is a single asyncio task
+# Two workers would double-ingest every transcript and race the rag_state cursor.
+# Do not raise numInstances or --workers.
+
+services:
+  - type: web
+    name: meetingiq
+    runtime: python
+    plan: free
+
+    # IMMUTABLE after the first blueprint sync — changing it means deleting and
+    # recreating the service. singapore is the closest region to an India-based
+    # audience (~60ms vs ~250ms from oregon), which is the difference between the
+    # caption stream feeling live or laggy. Switch to oregon for a US audience.
+    region: singapore
+
+    # Render clones the whole repo and then scopes commands to rootDir, so
+    # ../extension/ is still on disk for the /api/extension.zip endpoint. This
+    # also makes the CWD backend/, which main.py's bare `from llm.registry import`
+    # requires.
+    rootDir: backend
+
+    numInstances: 1
+    autoDeployTrigger: commit
+    healthCheckPath: /health
+
+    buildCommand: pip install -r requirements.txt
+
+    # --forwarded-allow-ips is the flag that actually matters. uvicorn trusts only
+    # 127.0.0.1 by default and Render's proxy is not loopback, so without '*' the
+    # X-Forwarded-Proto header is parsed and then discarded and request.url.scheme
+    # stays "http". (The zip endpoint prefers RENDER_EXTERNAL_URL, so it is correct
+    # either way, but everything else that reads the scheme is not.)
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips='*'"
+
+    envVars:
+      # Render's current default is 3.14.3. google-generativeai is frozen upstream
+      # with classifiers stopping at 3.13, and there is no upside to the risk.
+      # 3.13.14 also matches local dev.
+      - key: PYTHON_VERSION
+        value: 3.13.14
+
+      - key: PIP_DISABLE_PIP_VERSION_CHECK
+        value: "1"
+
+      # DELIBERATELY ABSENT: OPENAI_API_KEY / GROQ_API_KEY / GOOGLE_API_KEY /
+      # GEMINI_API_KEY.
+      #
+      # llm/service.py resolve_api_key() falls back to these env vars whenever a
+      # request omits a key. Setting any one of them silently converts the
+      # bring-your-own-key design into "the owner is billed for every anonymous
+      # visitor's LLM calls". Never add them here or in the Render dashboard.

@@ -1,8 +1,21 @@
 /**
  * Observes Google Meet's caption UI with MutationObserver + heuristics.
  * Batches deduplicated lines and sends them to the service worker for POST /transcript.
+ *
+ * Root selection lives in caption-heuristics.js (loaded first by the manifest)
+ * so it can be unit-tested without a DOM; this file is the DOM and chrome.*
+ * plumbing around it.
  */
 (function meetTranscriptContent() {
+  const H = globalThis.MeetCaptionHeuristics;
+  if (!H) {
+    // Manifest load order guarantees this file exists; if it somehow did not
+    // load, stay idle rather than fall back to a weaker heuristic that would
+    // quietly record Meet's notification toasts as if they were speech.
+    console.error('[MeetTranscript] caption-heuristics.js failed to load; capture disabled.');
+    return;
+  }
+
   const BaseUtils = globalThis.MeetTranscriptUtils || {};
   const U = {
     normalizeText(s) {
@@ -12,13 +25,13 @@
         .replace(/\s+/g, ' ')
         .trim();
     },
-    parseCaptionLine(line, lastSpeaker) {
-      if (typeof BaseUtils.parseCaptionLine === 'function') return BaseUtils.parseCaptionLine(line, lastSpeaker);
+    parseCaptionLine(line, lastSpeakerName) {
+      if (typeof BaseUtils.parseCaptionLine === 'function') return BaseUtils.parseCaptionLine(line, lastSpeakerName);
       const raw = U.normalizeText(line);
       if (!raw) return null;
       const m = raw.match(/^([^:]{1,120}):\s*(.+)$/);
       if (m) return { speaker: U.normalizeText(m[1]) || 'Unknown', text: m[2].trim() };
-      return { speaker: lastSpeaker || 'Unknown', text: raw };
+      return { speaker: lastSpeakerName || 'Unknown', text: raw };
     },
     tryMergePartial(prev, next) {
       if (typeof BaseUtils.tryMergePartial === 'function') return BaseUtils.tryMergePartial(prev, next);
@@ -81,64 +94,16 @@
   const MAX_BUFFER = 200;
   const LOCAL_STORE_CAP = 500;
   const STORAGE_KEY = 'meetTranscriptEnabled';
+  const DEBUG_KEY = 'meetTranscriptDebug';
   const LOCAL_LINES_KEY = 'meetTranscriptLocalLines';
-  const SYSTEM_LINE_PATTERNS = [
-    /you have joined the call/i,
-    /live captions have been turned off/i,
-    /live captions have been turned on/i,
-    /presentation .* added to the main screen/i,
-    /is on the main screen/i,
-    /microphone/i,
-    /speakers?/i,
-    /camera is off/i,
-    /hand is lowered/i,
-    /muted/i,
-    /unmuted/i,
-    /host/i,
-    /meeting details/i,
-    /camera not found/i,
-    /videocall/i,
-    /turned (on|off)/i,
-    /show fewer options/i,
-    /show more options/i,
-    /chat with everyone/i,
-    /^apps?$/i,
-    /^more options$/i,
-    /^captions?$/i,
-    /^raise hand$/i,
-    /^present now$/i,
-    /^people$/i,
-    /^activities$/i,
-  ];
-  const BAD_SPEAKER_PATTERNS = [
-    /unknown/i,
-    /videocall/i,
-    /microphone/i,
-    /speaker/i,
-    /captions?/i,
-    /meeting/i,
-    /camera/i,
-    /video/i,
-    /device/i,
-    /chat with everyone/i,
-    /options/i,
-    /apps?/i,
-    /everyone/i,
-    /captions?/i,
-  ];
-  const BAD_TEXT_PATTERNS = [
-    /^apps?$/i,
-    /^expand_?less$/i,
-    /^expand_?more$/i,
-    /^show fewer options$/i,
-    /^show more options$/i,
-    /^chat with everyone$/i,
-    /^camera not found$/i,
-    /^you have joined the call/i,
-  ];
+  /** `[jsname]` matches a large slice of Meet's DOM; only scan it as a last resort. */
+  const WIDE_POOL_CAP = 80;
+  const REBIND_LOG_CAP = 100;
 
   /** @type {boolean} */
   let enabled = true;
+  /** @type {boolean} */
+  let debugEnabled = false;
   /** @type {string | null} */
   let observedMeetingId = null;
   /** @type {Element | null} */
@@ -163,8 +128,16 @@
   /** @type {MutationObserver | null} */
   let rootObserver = null;
 
+  /** Stable per-element ids so the arbiter can recognise the same candidate across ticks. */
+  const candidateKeys = new WeakMap();
+  let candidateKeySeq = 0;
+  /** Ring buffer of actual rebinds, readable from the console after a caption gap. */
+  const rebindLog = [];
+
+  const arbiter = H.createRootArbiter();
+
   const debouncedDigest = U.debounce(digestCaptionDom, DEBOUNCE_MS);
-  const throttledDiscovery = U.throttle(findAndBindCaptionRoot, 800);
+  const throttledDiscovery = U.throttle(() => findAndBindCaptionRoot('mutation'), 800);
 
   function isContextInvalidatedError(err) {
     const msg = String(err?.message || err || '').toLowerCase();
@@ -230,179 +203,124 @@
     return `adhoc-${u.pathname.replace(/\W/g, '').slice(0, 24) || 'meet'}`;
   }
 
-  function isVisible(el) {
-    if (!el || !(el instanceof Element)) return false;
-    const st = globalThis.getComputedStyle(el);
-    if (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0) return false;
-    const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
+  function keyFor(el) {
+    let key = candidateKeys.get(el);
+    if (!key) {
+      candidateKeySeq += 1;
+      key = `c${candidateKeySeq}`;
+      candidateKeys.set(el, key);
+    }
+    return key;
   }
 
-  function scoreCaptionCandidate(el) {
-    let score = 0;
-    const live = el.getAttribute?.('aria-live');
-    if (live === 'polite' || live === 'assertive') score += 55;
-    const role = el.getAttribute?.('role');
-    if (role === 'log' || role === 'status') score += 25;
-    if (!isVisible(el)) return -1;
-    const t = (el.innerText || '').trim();
-    if (t.length > 0 && t.length < 4000) score += 12;
-    if (/:\s/.test(t)) score += 18;
-    if (/[\n\r]/.test(t)) score += 8;
-    if (t.length > 2000) score -= 15;
-    if (SYSTEM_LINE_PATTERNS.some((p) => p.test(t))) score -= 20;
-    // Prefer smaller regions that look like one caption card vs. whole page live region
-    const area = el.getBoundingClientRect();
-    const pixels = area.width * area.height;
-    if (pixels > 0 && pixels < 800000) score += 8;
-    if (area.top > window.innerHeight * 0.45) score += 8;
-    if (area.left > window.innerWidth * 0.15 && area.right < window.innerWidth * 0.85) score += 4;
-    const lines = extractLinesFromRawText(t);
-    const signal = captionSignalScore(lines);
-    score += signal;
-    if (lines.length < 2) score -= 8;
-    if (lines.length > 20) score -= 10;
-    return score;
+  function isAttached(el) {
+    if (!el) return false;
+    if (typeof el.isConnected === 'boolean') return el.isConnected;
+    return document.documentElement.contains(el);
+  }
+
+  function describeAndScore(el) {
+    const key = keyFor(el);
+    const features = H.describeCandidate(el, window, key);
+    const scored = H.scoreCandidateFeatures(features);
+    return {
+      el,
+      key,
+      features,
+      score: scored.score,
+      notification: scored.notification,
+      reasons: scored.reasons,
+    };
+  }
+
+  function queryPool(selector) {
+    try {
+      return Array.from(document.querySelectorAll(selector));
+    } catch (_) {
+      return [];
+    }
   }
 
   /**
-   * Dynamic discovery: prefer aria-live regions; fall back to role=log / Meet-ish containers.
+   * Score every plausible caption container on the page.
+   *
+   * The narrow accessibility pools are scanned first; the wide `[jsname]` pool
+   * costs a forced layout per element, so it is only consulted when the narrow
+   * pools produced nothing bindable.
    */
-  function findBestCaptionRoot() {
-    const pools = [];
-    try {
-      pools.push(...document.querySelectorAll('[aria-live="polite"], [aria-live="assertive"]'));
-    } catch (_) {
-      /* ignore */
+  function collectCandidates() {
+    const seen = new Set();
+    const scored = [];
+    const consume = (elements) => {
+      for (const el of elements) {
+        if (seen.has(el)) continue;
+        seen.add(el);
+        scored.push(describeAndScore(el));
+      }
+    };
+
+    consume(queryPool('[aria-live="polite"], [aria-live="assertive"]'));
+    consume(queryPool('[role="log"], [role="status"]'));
+
+    const haveViable = scored.some((c) => !c.notification && c.score >= H.MIN_ACCEPT_SCORE);
+    if (!haveViable) {
+      consume(queryPool('[jsname], [data-message-text], [data-message-id]').slice(0, WIDE_POOL_CAP));
     }
-    try {
-      pools.push(...document.querySelectorAll('[role="log"], [role="status"]'));
-    } catch (_) {
-      /* ignore */
-    }
-    try {
-      pools.push(...document.querySelectorAll('[jsname], [data-message-text], [data-message-id]'));
-    } catch (_) {
-      /* ignore */
-    }
+    return scored;
+  }
+
+  function bestViableCandidate(candidates) {
+    const list = candidates || collectCandidates();
     let best = null;
-    let bestScore = -Infinity;
-    for (const el of pools) {
-      const s = scoreCaptionCandidate(el);
-      if (s > bestScore) {
-        bestScore = s;
-        best = el;
-      }
+    for (const c of list) {
+      if (c.notification || c.score < H.MIN_ACCEPT_SCORE) continue;
+      if (!best || c.score > best.score) best = c;
     }
-    return bestScore >= 8 ? best : null;
+    return best;
   }
 
-  function extractLinesFromRawText(rawText) {
-    const raw = String(rawText || '').replace(/\r\n/g, '\n');
-    return raw
-      .split('\n')
-      .map((l) => U.normalizeText(l))
-      .filter(Boolean);
+  function summariseCandidate(c) {
+    return {
+      key: c.key,
+      score: c.score,
+      notification: c.notification,
+      ariaLive: c.features.ariaLive,
+      role: c.features.role,
+      lines: c.features.lineCount,
+      reasons: c.reasons,
+      snippet: c.features.lines.slice(0, 3).join(' | ').slice(0, 160),
+    };
   }
 
-  function extractLinesFromRoot(root) {
-    return extractLinesFromRawText(root?.innerText || '');
-  }
-
-  function isSystemLine(line) {
-    return SYSTEM_LINE_PATTERNS.some((p) => p.test(line));
-  }
-
-  function isPlausibleSpeakerName(name) {
-    const n = U.normalizeText(name);
-    if (!n || n.length < 2 || n.length > 48) return false;
-    if (BAD_SPEAKER_PATTERNS.some((p) => p.test(n))) return false;
-    if (/\d{3,}/.test(n)) return false;
-    const words = n.split(/\s+/).filter(Boolean);
-    if (words.length < 1 || words.length > 5) return false;
-    if (!/^[\p{L}\p{M}'`.-]+(?:\s+[\p{L}\p{M}'`.-]+)*$/u.test(n)) return false;
-    if (n === n.toLowerCase() && !n.includes(' ')) return false;
-    return true;
-  }
-
-  function isLikelySpeakerLabel(line) {
-    if (!line) return false;
-    if (line.length > 64) return false;
-    if (/[.:!?]$/.test(line)) return false;
-    if (/\d/.test(line)) return false;
-    if (isSystemLine(line)) return false;
-    return isPlausibleSpeakerName(line);
-  }
-
-  function isLikelySpokenText(text) {
-    const t = U.normalizeText(text);
-    if (!t) return false;
-    if (isSystemLine(t)) return false;
-    if (BAD_TEXT_PATTERNS.some((p) => p.test(t))) return false;
-    if (t.length < 8) return false;
-    const words = t.split(/\s+/).filter(Boolean);
-    if (words.length < 3) return false;
-    // Reject button-y labels and identifiers.
-    if (/^[a-z_]+$/.test(t)) return false;
-    if (/^[A-Za-z ]{1,24}$/.test(t) && words.length <= 2) return false;
-    return true;
-  }
-
-  function captionSignalScore(lines) {
-    if (!lines.length) return -10;
-    let signal = 0;
-    let systemCount = 0;
-    for (let i = 0; i < lines.length; i += 1) {
-      const line = lines[i];
-      if (isSystemLine(line)) {
-        systemCount += 1;
-        continue;
-      }
-      const parsed = U.parseCaptionLine(line, '');
-      if (line.includes(':') && parsed && isPlausibleSpeakerName(parsed.speaker) && isLikelySpokenText(parsed.text)) {
-        signal += 20;
-      }
-      if (i > 0 && isLikelySpeakerLabel(lines[i - 1]) && isLikelySpokenText(line)) {
-        signal += 14;
-      }
-      if (/^[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}$/.test(line)) signal += 2;
+  /**
+   * Records why the caption root was (or was not) changed. Console output is
+   * behind the meetTranscriptDebug flag; actual rebinds are always kept in a
+   * small ring buffer so a gap can be diagnosed after the fact.
+   */
+  function logRootDecision(trigger, decision, bound, candidates) {
+    const changed = decision.action === 'bind' || decision.action === 'unbind';
+    if (changed) {
+      rebindLog.push({
+        at: new Date().toISOString(),
+        trigger,
+        action: decision.action,
+        reason: decision.reason,
+        from: bound ? bound.key : null,
+        fromScore: bound ? bound.score : null,
+        fromAttached: bound ? bound.attached : null,
+        to: decision.key,
+        toScore: decision.score,
+        candidates: candidates.map(summariseCandidate),
+      });
+      if (rebindLog.length > REBIND_LOG_CAP) rebindLog.splice(0, rebindLog.length - REBIND_LOG_CAP);
     }
-    signal -= systemCount * 6;
-    return signal;
-  }
-
-  function selectBestCaptionCandidate(lines) {
-    if (!lines.length) return null;
-    // Prefer explicit "Speaker: text" forms first.
-    for (let i = lines.length - 1; i >= 0; i -= 1) {
-      const line = lines[i];
-      const parsed = U.parseCaptionLine(line, lastSpeaker);
-      if (!parsed) continue;
-      if (line.includes(':') && isPlausibleSpeakerName(parsed.speaker) && isLikelySpokenText(parsed.text)) {
-        return parsed;
-      }
-    }
-
-    // Fallback: two-line pattern where previous line is speaker label.
-    for (let i = lines.length - 1; i >= 1; i -= 1) {
-      const textLine = lines[i];
-      const speakerLine = lines[i - 1];
-      if (!textLine || !speakerLine) continue;
-      if (!isLikelySpokenText(textLine)) continue;
-      if (!isLikelySpeakerLabel(speakerLine)) continue;
-      return { speaker: speakerLine, text: textLine };
-    }
-
-    // Last fallback: line without speaker only if we already know a speaker and line is not system text.
-    for (let i = lines.length - 1; i >= 0; i -= 1) {
-      const line = lines[i];
-      if (!isLikelySpokenText(line)) continue;
-      if (lastSpeaker && isPlausibleSpeakerName(lastSpeaker)) {
-        return { speaker: lastSpeaker, text: line };
-      }
-    }
-
-    return null;
+    if (!debugEnabled) return;
+    const label = `[MeetTranscript] root ${decision.action} (${decision.reason}) via ${trigger}`;
+    console.groupCollapsed(label);
+    console.log('bound', bound);
+    console.log('decision', decision);
+    console.table(candidates.map(summariseCandidate));
+    console.groupEnd();
   }
 
   function pruneDedupeMap(now) {
@@ -418,15 +336,6 @@
     if (prev && now - prev < DEDUPE_WINDOW_MS) return true;
     recentFingerprints.set(fp, now);
     return false;
-  }
-
-  /** Continuation chunks can be short; filter obvious noise only. */
-  function isDeltaWorthEmit(delta) {
-    const d = U.normalizeText(delta);
-    if (!d) return false;
-    if (BAD_TEXT_PATTERNS.some((p) => p.test(d))) return false;
-    if (d.length < 2 && !/\w/u.test(d)) return false;
-    return true;
   }
 
   /**
@@ -462,6 +371,7 @@
     lastEmittedCumulativeBySpeaker.clear();
     lastDigestSnapshot = '';
     recentFingerprints.clear();
+    arbiter.reset();
   }
 
   function appendLocalStore(item) {
@@ -482,18 +392,20 @@
   function digestCaptionDom() {
     if (!enabled) return;
     let lines = [];
-    if (captionRoot) {
-      lines = extractLinesFromRoot(captionRoot);
+    if (captionRoot && isAttached(captionRoot)) {
+      lines = H.extractLines(captionRoot.innerText || '');
     } else {
-      const fallbackRoot = findBestCaptionRoot();
-      if (fallbackRoot) lines = extractLinesFromRoot(fallbackRoot);
+      // Unbound (or bound to a node Meet just removed): read the best candidate
+      // directly so the rebind window is not a capture gap.
+      const fallback = bestViableCandidate();
+      if (fallback) lines = H.extractLines(fallback.el.innerText || '');
     }
     if (!lines.length) return;
     const snapshot = lines.join('\n');
     if (snapshot === lastDigestSnapshot) return;
     lastDigestSnapshot = snapshot;
 
-    const parsed = selectBestCaptionCandidate(lines);
+    const parsed = H.selectBestCaptionCandidate(lines, lastSpeaker);
     if (!parsed) return;
     const sp = U.normalizeText(parsed.speaker) || 'Unknown';
     const full = U.normalizeText(parsed.text);
@@ -507,8 +419,8 @@
     if (!delta) return;
 
     const isFirstSegment = !prevCumulative;
-    if (isFirstSegment && !isLikelySpokenText(full)) return;
-    if (!isFirstSegment && !isDeltaWorthEmit(delta)) return;
+    if (isFirstSegment && !H.isLikelySpokenText(full)) return;
+    if (!isFirstSegment && !H.isDeltaWorthEmit(delta)) return;
 
     commitLine(sp, delta);
   }
@@ -544,29 +456,55 @@
   }
 
   function bindObserverTo(root) {
-    teardownObserver();
-    lastDigestSnapshot = '';
-    lastEmittedCumulativeBySpeaker.clear();
+    if (observer) {
+      observer.disconnect();
+      observer = null;
+    }
     captionRoot = root;
+    // Force a re-read of the new root's contents...
+    lastDigestSnapshot = '';
+    // ...but deliberately keep lastEmittedCumulativeBySpeaker. Meet swaps caption
+    // nodes constantly; clearing delta state on every swap makes the still-visible
+    // line look brand new and re-emits text we have already sent.
     observer = new MutationObserver(onMutations);
     observer.observe(root, { subtree: true, childList: true, characterData: true });
     // Initial read
     debouncedDigest();
   }
 
-  function findAndBindCaptionRoot() {
+  /**
+   * Re-evaluate which element is the live caption box.
+   *
+   * Never tears capture down merely because this pass scored badly — only a
+   * detached root or a corroborated better candidate causes a change. See
+   * createRootArbiter in caption-heuristics.js for the rules.
+   */
+  function findAndBindCaptionRoot(trigger) {
     if (!enabled) return;
-    const next = findBestCaptionRoot();
-    if (!next) {
-      if (captionRoot) teardownObserver();
-      lastDigestSnapshot = '';
-      lastEmittedCumulativeBySpeaker.clear();
-      setIndicator(false);
-      return;
+    const candidates = collectCandidates();
+
+    let bound = null;
+    if (captionRoot) {
+      const attached = isAttached(captionRoot);
+      let entry = candidates.find((c) => c.el === captionRoot);
+      if (!entry && attached) entry = describeAndScore(captionRoot);
+      bound = {
+        key: keyFor(captionRoot),
+        score: entry ? entry.score : H.DISQUALIFIED,
+        attached,
+      };
     }
-    if (captionRoot === next) return;
-    bindObserverTo(next);
-    setIndicator(true);
+
+    const decision = arbiter.evaluate({ bound, candidates });
+    logRootDecision(trigger || 'unknown', decision, bound, candidates);
+
+    if (decision.action === 'bind') {
+      const next = candidates.find((c) => c.key === decision.key);
+      if (next && next.el !== captionRoot) bindObserverTo(next.el);
+    } else if (decision.action === 'unbind') {
+      teardownObserver();
+    }
+    setIndicator(Boolean(captionRoot));
   }
 
   /** @param {boolean} active */
@@ -594,22 +532,76 @@
     }
   }
 
+  function setDebug(next) {
+    debugEnabled = Boolean(next);
+    if (!extensionContextActive()) return;
+    try {
+      chrome.storage.local.set({ [DEBUG_KEY]: debugEnabled });
+    } catch (err) {
+      if (isContextInvalidatedError(err)) stopAll();
+    }
+  }
+
+  /**
+   * Console handle for diagnosing caption gaps. Pick the "Meet Transcript Stream"
+   * context in the DevTools console dropdown, then:
+   *   __meetTranscript.enableDebug()   // log every rebind decision from now on
+   *   __meetTranscript.rebinds()       // the last 100 rebinds, always recorded
+   *   __meetTranscript.candidates()    // score every candidate right now
+   */
+  globalThis.__meetTranscript = {
+    get debug() {
+      return debugEnabled;
+    },
+    enableDebug() {
+      setDebug(true);
+      return true;
+    },
+    disableDebug() {
+      setDebug(false);
+      return false;
+    },
+    rebinds() {
+      return rebindLog.slice();
+    },
+    candidates() {
+      return collectCandidates().map(summariseCandidate);
+    },
+    state() {
+      return {
+        enabled,
+        debugEnabled,
+        meetingId: observedMeetingId,
+        boundKey: captionRoot ? keyFor(captionRoot) : null,
+        boundAttached: captionRoot ? isAttached(captionRoot) : null,
+        arbiter: arbiter.state,
+        buffered: outBuffer.length,
+        lastSpeaker,
+      };
+    },
+  };
+
   function start() {
     if (!extensionContextActive()) return;
-    chrome.storage.local.get([STORAGE_KEY], guard('storage.get.start', (cfg) => {
+    chrome.storage.local.get([STORAGE_KEY, DEBUG_KEY], guard('storage.get.start', (cfg) => {
       if (!extensionContextActive()) return;
       enabled = cfg[STORAGE_KEY] !== false;
+      debugEnabled = cfg[DEBUG_KEY] === true;
       meetingLifecycleTick();
-      findAndBindCaptionRoot();
+      findAndBindCaptionRoot('start');
 
       rootObserver = new MutationObserver(guard('rootObserver', () => {
         throttledDiscovery();
+        // While unbound there is no caption observer to drive the digest, so the
+        // page-level observer has to — otherwise a rebind window captures nothing.
+        if (!captionRoot) debouncedDigest();
       }));
       rootObserver.observe(document.documentElement, { subtree: true, childList: true });
 
       discoveryTimer = setInterval(guard('discoveryTimer', () => {
         meetingLifecycleTick();
-        findAndBindCaptionRoot();
+        findAndBindCaptionRoot('interval');
+        if (!captionRoot) debouncedDigest();
       }), DISCOVERY_MS);
 
       flushTimer = setInterval(guard('flushTimer', () => {
@@ -628,27 +620,31 @@
         setTimeout(() => {
           guard('pushStateTick', () => {
             meetingLifecycleTick();
-            findAndBindCaptionRoot();
+            findAndBindCaptionRoot('pushstate');
           })();
         }, 0);
         return r;
       };
       window.addEventListener('popstate', guard('popstate', () => {
         meetingLifecycleTick();
-        findAndBindCaptionRoot();
+        findAndBindCaptionRoot('popstate');
       }));
     }));
 
     chrome.storage.onChanged.addListener(guard('storage.onChanged', (changes, area) => {
       if (!extensionContextActive()) return;
       if (area !== 'local') return;
+      if (changes[DEBUG_KEY]) {
+        debugEnabled = changes[DEBUG_KEY].newValue === true;
+      }
       if (changes[STORAGE_KEY]) {
         enabled = changes[STORAGE_KEY].newValue !== false;
         if (!enabled) {
           teardownObserver();
+          arbiter.reset();
           flushPending(true);
         } else {
-          findAndBindCaptionRoot();
+          findAndBindCaptionRoot('toggle');
         }
         setIndicator(!!captionRoot);
       }

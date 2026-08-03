@@ -25,7 +25,7 @@
   "content_scripts": [
     {
       "matches": ["https://meet.google.com/*"],
-      "js": ["utils.js", "content.js"],
+      "js": ["utils.js", "caption-heuristics.js", "content.js"],
       "css": ["styles/inject.css"],
       "run_at": "document_idle"
     }

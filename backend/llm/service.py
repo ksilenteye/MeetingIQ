@@ -78,7 +78,7 @@ def _fallback_qa(lines: List[Dict[str, Any]], question: str) -> str:
     if not scored:
         return "I could not find a direct answer in the current transcript context."
     scored.sort(key=lambda x: x[0], reverse=True)
-    return "Based on transcript: " + " | ".join(s[:2] for s in scored[:3])
+    return "Based on transcript: " + " | ".join(text for _score, text in scored[:3])
 
 
 def run_llm_action(

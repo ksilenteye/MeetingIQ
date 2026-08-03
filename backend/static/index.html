@@ -31,6 +31,16 @@
       .keyRow { display: flex; flex-direction: column; gap: 4px; }
       .keyRow label { font-size: 12px; color: #9da7b7; }
       .hint { font-size: 11px; color: #7a8494; }
+      /* .panel.setup, not .setup: .panel sets min-height unconditionally, and a
+         two-class selector keeps winning if the stylesheet is ever reordered. */
+      .panel.setup { min-height: auto; margin-bottom: 12px; }
+      .setup ol { margin: 6px 0 0; padding-left: 20px; line-height: 1.7; }
+      .setup li { margin-bottom: 2px; }
+      .setup code { background: #191d24; border: 1px solid #2f3845; border-radius: 4px; padding: 1px 5px; font-size: 12px; }
+      /* the button rule above targets tags, so an <a> inherits nothing */
+      .dl { align-self: flex-start; background: #1c2a3c; color: #7fc0ff; border: 1px solid #2f5478;
+            border-radius: 6px; padding: 9px 14px; text-decoration: none; font-weight: bold; }
+      .dl:hover { background: #223347; }
       @media (max-width: 960px) { .grid { grid-template-columns: 1fr; } .panel { min-height: auto; } #liveList { height: 380px; } }
     </style>
   </head>
@@ -43,6 +53,30 @@
         <button id="loadBtn">Load</button>
         <button id="clearBtn">Clear UI</button>
       </div>
+
+      <section class="panel setup">
+        <h2>Get started — install the Chrome extension</h2>
+        <div class="llmBody">
+          <a class="dl" href="/api/extension.zip" download>⬇ Download extension (.zip)</a>
+          <ol>
+            <li>Unzip it — on Windows, right-click → <strong>Extract All</strong>. Don't load it
+                from inside the zip preview window.</li>
+            <li>Open <code>chrome://extensions</code> and turn on <strong>Developer mode</strong>
+                (top right).</li>
+            <li>Click <strong>Load unpacked</strong> and pick the extracted folder — the one with
+                <code>manifest.json</code> in it. The 🎙️ icon appears in your toolbar.</li>
+            <li>Join any Google Meet and turn on <strong>live captions</strong> (the
+                <code>CC</code> button). Nothing is captured without them.</li>
+            <li>Come back to this tab and pick your meeting from the dropdown above.</li>
+          </ol>
+          <div class="hint">
+            Built on demand and wired to <code id="extTarget"></code>, so there is nothing to
+            configure — you always get a copy pointing at the server you downloaded it from.
+            Leave this tab open while you demo: the free-tier server sleeps when idle, and this
+            page pings it every 10 seconds to keep it awake.
+          </div>
+        </div>
+      </section>
 
       <div class="grid">
         <section class="panel">
@@ -285,6 +319,10 @@
         liveList.innerHTML = "";
         chatHistoryEl.innerHTML = "";
       });
+
+      // read from location rather than a second endpoint, so it cannot drift
+      // from the URL the zip endpoint bakes in — both derive from the same host
+      document.getElementById("extTarget").textContent = location.origin + "/transcript";
 
       connectWs();
       loadMeetings();

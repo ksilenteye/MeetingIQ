@@ -36,7 +36,9 @@
       <input type="checkbox" id="enabled" />
       Stream captions to API
     </label>
-    <p>Enable live captions in Meet. Data posts to <code>http://localhost:8000/transcript</code>.</p>
+    <!-- data-meetingiq="api-url" is rewritten by GET /api/extension.zip; see background.js -->
+    <p>Enable live captions in Meet. Data posts to
+      <code data-meetingiq="api-url">http://localhost:8000/transcript</code>.</p>
     <script src="popup.js"></script>
   </body>
 </html>

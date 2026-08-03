@@ -18,6 +18,18 @@ class Embedder:
         except Exception:
             self._model = None
 
+    @property
+    def is_semantic(self) -> bool:
+        """
+        True when a real sentence-transformers model is loaded.
+
+        The hash fallback below is deterministic but not semantic: two different
+        sentences hash to near-orthogonal vectors, so their cosine similarity sits
+        around 0 no matter how related they are. Callers that compare scores
+        against a similarity threshold must check this first.
+        """
+        return self._model is not None
+
     def embed_texts(self, texts: List[str]) -> np.ndarray:
         if not texts:
             return np.empty((0, self.dim), dtype=np.float32)

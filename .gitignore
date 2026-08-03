@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# local meeting data — see CLAUDE.md; the committed copy still needs
+# `git rm --cached backend/transcripts.db` to stop being tracked
+*.db
+*.db-journal
+*.db-wal
