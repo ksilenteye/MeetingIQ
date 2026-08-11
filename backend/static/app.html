@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MeetingIQ — Dashboard</title>
+    <link rel="stylesheet" href="/static/css/theme.css" />
+    <link rel="stylesheet" href="/static/css/app.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%236c4cf1'/><path d='M16 8a4 4 0 0 1 4 4v4a4 4 0 0 1-8 0v-4a4 4 0 0 1 4-4zM10 16a6 6 0 0 0 12 0M16 22v3' stroke='white' stroke-width='2.2' fill='none' stroke-linecap='round'/></svg>"
+    />
+  </head>
+  <body>
+    <div class="app">
+      <!-- ------------------------------------------------------------ aside -->
+      <aside class="sidebar">
+        <a class="brand" href="/">
+          <span class="brand-mark">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="9" y="2" width="6" height="11" rx="3" />
+              <path d="M5 11a7 7 0 0 0 14 0M12 18v4" />
+            </svg>
+          </span>
+          MeetingIQ
+        </a>
+
+        <nav class="side-nav" id="sideNav">
+          <button data-view="dashboard" class="active">
+            <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1.5" /><rect x="14" y="3" width="7" height="5" rx="1.5" /><rect x="14" y="12" width="7" height="9" rx="1.5" /><rect x="3" y="16" width="7" height="5" rx="1.5" /></svg>
+            Dashboard
+          </button>
+          <button data-view="meetings">
+            <svg viewBox="0 0 24 24"><rect x="2" y="6" width="13" height="12" rx="2" /><path d="M15 10l7-3v10l-7-3" /></svg>
+            Meetings <span class="count" id="navMeetings">0</span>
+          </button>
+          <button data-view="summaries">
+            <svg viewBox="0 0 24 24"><path d="M4 5h16M4 10h10M4 15h13M4 20h7" /></svg>
+            Summaries <span class="count" id="navSummaries">0</span>
+          </button>
+          <button data-view="transcripts">
+            <svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>
+            Transcripts
+          </button>
+          <button data-view="actions">
+            <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3" /><path d="M9 12l2 2 4-4" /></svg>
+            Action Items <span class="count" id="navActions">0</span>
+          </button>
+          <button data-view="insights">
+            <svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" /></svg>
+            Insights
+          </button>
+          <button data-view="settings">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 7.9 19.4l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 3 14.6a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 7.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.6 1.6 0 0 0 10 3.6V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 2.7 1.1l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0 1.1 2.7H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1.3z" /></svg>
+            Settings
+          </button>
+          <button data-view="help">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M9.6 9.5a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .9-1 1.6v.3M12 17.5h.01" /></svg>
+            Help &amp; Support
+          </button>
+        </nav>
+
+        <div class="side-foot">
+          <div class="plan-card">
+            <span class="tiny">Your Deployment</span>
+            <strong id="planName">Self-hosted</strong>
+            <a class="btn btn-primary btn-sm" href="/api/extension.zip" download>Get Extension</a>
+          </div>
+          <button class="side-nav-logout btn btn-subtle btn-sm" id="backHome" style="justify-content: flex-start">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M15 17l5-5-5-5M20 12H9M12 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6" /></svg>
+            Back to site
+          </button>
+        </div>
+      </aside>
+
+      <!-- ------------------------------------------------------------- main -->
+      <div class="main">
+        <header class="topbar">
+          <div class="search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
+            <input id="globalSearch" type="search" placeholder="Search meetings…" aria-label="Search meetings" />
+            <kbd>Ctrl K</kbd>
+          </div>
+          <div class="spacer"></div>
+          <button class="icon-btn" id="refreshBtn" title="Refresh data" aria-label="Refresh data">
+            <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 4v5h-5" /></svg>
+          </button>
+          <button class="icon-btn" id="bellBtn" title="Connection status" aria-label="Connection status">
+            <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 8-3 8h18s-3-1-3-8M13.7 21a2 2 0 0 1-3.4 0" /></svg>
+            <span class="badge" id="bellBadge" hidden>0</span>
+          </button>
+          <div class="who"><span class="avatar" id="whoAvatar">IQ</span> <span id="whoName">Local</span></div>
+        </header>
+
+        <main class="content">
+          <!-- ======================================================= dashboard -->
+          <section class="view" data-view="dashboard">
+            <div class="page-head">
+              <div>
+                <h1>Welcome back 👋</h1>
+                <p id="dashSub">Here's what happened in your meetings.</p>
+              </div>
+              <button class="btn btn-primary" id="newMeetingBtn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+                New Meeting
+              </button>
+            </div>
+
+            <div class="stat-grid" id="statGrid"></div>
+
+            <section class="card">
+              <div class="card-head">
+                <h2>Recent Meetings</h2>
+                <button class="link" data-goto="meetings">View All Meetings →</button>
+              </div>
+              <div class="table-wrap">
+                <table class="table">
+                  <thead>
+                    <tr>
+                      <th>Meeting</th>
+                      <th>Date &amp; Time</th>
+                      <th>Duration</th>
+                      <th>Participants</th>
+                      <th>Lines</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="recentMeetings"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <div class="duo">
+              <section class="card">
+                <div class="card-head">
+                  <h2>AI Summary <span>(Latest)</span></h2>
+                  <span class="chip" id="summaryChip">—</span>
+                </div>
+                <div class="scroll-body" id="latestSummary"></div>
+                <div class="card-foot">
+                  <button class="link" data-goto="summaries">View Full Summary →</button>
+                </div>
+              </section>
+
+              <section class="card">
+                <div class="card-head">
+                  <h2>Transcript <span>(Latest)</span></h2>
+                  <span class="chip" id="wsChip">connecting…</span>
+                </div>
+                <div class="scroll-body" id="latestTranscript"></div>
+                <div class="card-foot">
+                  <button class="link" data-goto="transcripts">View Full Transcript →</button>
+                </div>
+              </section>
+            </div>
+
+            <section class="card">
+              <div class="card-head">
+                <h2>Integrations &amp; Status</h2>
+                <span class="tiny muted">Live from this server</span>
+              </div>
+              <div class="card-body">
+                <div class="integrations" id="integrations"></div>
+              </div>
+            </section>
+          </section>
+
+          <!-- ======================================================== meetings -->
+          <section class="view" data-view="meetings" hidden>
+            <div class="page-head">
+              <div>
+                <h1>Meetings</h1>
+                <p>Every meeting captured into this database.</p>
+              </div>
+              <button class="btn btn-ghost" id="exportMeetings">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" /></svg>
+                Export JSON
+              </button>
+            </div>
+            <section class="card">
+              <div class="table-wrap">
+                <table class="table">
+                  <thead>
+                    <tr>
+                      <th>Meeting</th>
+                      <th>Started</th>
+                      <th>Duration</th>
+                      <th>Participants</th>
+                      <th>Lines</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="allMeetings"></tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+
+          <!-- ======================================================= summaries -->
+          <section class="view" data-view="summaries" hidden>
+            <div class="page-head">
+              <div>
+                <h1>Summaries</h1>
+                <p>Generated with the provider configured in Settings. Every run is stored.</p>
+              </div>
+              <div class="row">
+                <select id="summaryMeeting" style="width: 230px"></select>
+                <button class="btn btn-primary" id="generateSummary">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8z" /></svg>
+                  Generate
+                </button>
+              </div>
+            </div>
+            <section class="card">
+              <div class="card-head">
+                <h2>History</h2>
+                <span class="tiny muted" id="summaryMeta"></span>
+              </div>
+              <div class="scroll-body tall" id="summaryList"></div>
+            </section>
+          </section>
+
+          <!-- ====================================================== transcripts -->
+          <section class="view" data-view="transcripts" hidden>
+            <div class="page-head">
+              <div>
+                <h1>Transcripts</h1>
+                <p>Stored lines, plus anything arriving live over the WebSocket.</p>
+              </div>
+              <div class="row">
+                <select id="transcriptMeeting" style="width: 230px"></select>
+                <button class="btn btn-ghost btn-sm" id="clearTranscript">Clear view</button>
+              </div>
+            </div>
+            <section class="card">
+              <div class="card-head">
+                <h2 id="transcriptTitle">Transcript</h2>
+                <div class="row">
+                  <input id="transcriptSearch" type="search" placeholder="Search in transcript…" style="width: 210px" />
+                  <span class="chip" id="wsChip2">connecting…</span>
+                </div>
+              </div>
+              <div class="scroll-body tall" id="transcriptBody"></div>
+            </section>
+
+            <section class="card">
+              <div class="card-head"><h2>Ask about this meeting</h2></div>
+              <div class="card-body stack">
+                <div class="inline-form">
+                  <div class="field">
+                    <label for="askInput">Question</label>
+                    <input id="askInput" type="text" placeholder="What did we decide about the launch date?" />
+                  </div>
+                  <button class="btn btn-primary" id="askBtn">Ask</button>
+                </div>
+                <label class="check">
+                  <input type="checkbox" id="askUseRag" checked />
+                  <span>Ground the answer in the retrieval index (falls back to raw transcript rows when the index has nothing).</span>
+                </label>
+                <div id="askResult" class="summary-body muted">Answers appear here.</div>
+              </div>
+            </section>
+          </section>
+
+          <!-- ==================================================== action items -->
+          <section class="view" data-view="actions" hidden>
+            <div class="page-head">
+              <div>
+                <h1>Action Items</h1>
+                <p>Extracted from the most recent summary of each meeting — no separate inference pass.</p>
+              </div>
+              <select id="actionMeeting" style="width: 230px"></select>
+            </div>
+            <section class="card">
+              <div class="card-head">
+                <h2>Open items</h2>
+                <span class="tiny muted" id="actionMeta"></span>
+              </div>
+              <div class="scroll-body tall" id="actionList"></div>
+            </section>
+          </section>
+
+          <!-- ======================================================== insights -->
+          <section class="view" data-view="insights" hidden>
+            <div class="page-head">
+              <div>
+                <h1>Insights</h1>
+                <p>Counted from stored transcript rows. No estimates.</p>
+              </div>
+              <select id="insightMeeting" style="width: 230px"></select>
+            </div>
+            <div class="duo">
+              <section class="card">
+                <div class="card-head"><h2>Talk time by speaker</h2><span class="tiny muted">share of words</span></div>
+                <div class="card-body"><div class="bars" id="speakerBars"></div></div>
+              </section>
+              <section class="card">
+                <div class="card-head"><h2>Capture volume</h2><span class="tiny muted">lines per day</span></div>
+                <div class="card-body">
+                  <div class="spark" id="activitySpark"></div>
+                  <div class="spark-labels" id="activityLabels"></div>
+                </div>
+              </section>
+            </div>
+            <section class="card">
+              <div class="card-head"><h2>AI usage</h2><span class="tiny muted">runs by provider and action</span></div>
+              <div class="card-body"><div class="bars" id="providerBars"></div></div>
+            </section>
+          </section>
+
+          <!-- ======================================================== settings -->
+          <section class="view" data-view="settings" hidden>
+            <div class="page-head">
+              <div>
+                <h1>Settings</h1>
+                <p>Keys are kept in this browser's localStorage and sent per request. They are never stored on the server.</p>
+              </div>
+            </div>
+
+            <section class="card">
+              <div class="card-head"><h2>LLM provider</h2><span class="chip" id="keyChip">no key</span></div>
+              <div class="card-body">
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="llmProvider">Provider</label>
+                    <select id="llmProvider"></select>
+                  </div>
+                  <div class="field">
+                    <label for="modelName">Model override</label>
+                    <input id="modelName" type="text" placeholder="e.g. gpt-4o-mini, llama-3.3-70b-versatile" />
+                    <span class="hint">Leave empty to use the provider's default.</span>
+                  </div>
+                  <div class="field" id="keyOpenaiRow">
+                    <label for="keyOpenai">OpenAI API key</label>
+                    <input id="keyOpenai" type="password" autocomplete="off" placeholder="sk-…" />
+                  </div>
+                  <div class="field" id="keyGroqRow">
+                    <label for="keyGroq">Groq API key</label>
+                    <input id="keyGroq" type="password" autocomplete="off" placeholder="gsk_…" />
+                  </div>
+                  <div class="field" id="keyGeminiRow">
+                    <label for="keyGemini">Google AI (Gemini) API key</label>
+                    <input id="keyGemini" type="password" autocomplete="off" placeholder="AIza…" />
+                  </div>
+                </div>
+                <div class="stack" style="margin-top: 16px">
+                  <label class="check">
+                    <input type="checkbox" id="allowFallback" checked />
+                    <span>Allow the heuristic fallback when no key is set. Results are keyword-based, not generated.</span>
+                  </label>
+                  <label class="check">
+                    <input type="checkbox" id="useRag" checked />
+                    <span>Use retrieval context for summaries and questions.</span>
+                  </label>
+                </div>
+              </div>
+            </section>
+
+            <div class="duo">
+              <section class="card">
+                <div class="card-head"><h2>Extension</h2></div>
+                <div class="card-body stack">
+                  <p class="small">
+                    The download is built on demand and wired to
+                    <code class="mono" id="extTarget"></code>, so there is nothing to configure.
+                  </p>
+                  <a class="btn btn-primary" href="/api/extension.zip" download style="align-self: flex-start">
+                    Download extension (.zip)
+                  </a>
+                </div>
+              </section>
+
+              <section class="card">
+                <div class="card-head"><h2>Assistant</h2></div>
+                <div class="card-body stack">
+                  <div id="assistantStats" class="small"></div>
+                  <button class="btn btn-ghost btn-sm" id="forceIngest" style="align-self: flex-start">
+                    Force an ingest cycle
+                  </button>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <!-- ============================================================ help -->
+          <section class="view" data-view="help" hidden>
+            <div class="page-head">
+              <div>
+                <h1>Help &amp; Support</h1>
+                <p>Install steps, and what to check when nothing shows up.</p>
+              </div>
+            </div>
+
+            <div class="duo">
+              <section class="card">
+                <div class="card-head"><h2>Install the extension</h2></div>
+                <div class="card-body">
+                  <ol class="small" style="line-height: 1.9; padding-left: 18px; margin: 0; color: var(--muted)">
+                    <li>Download the zip — it is already pointed at this server.</li>
+                    <li>Extract it. On Windows, right-click → <strong>Extract All</strong>.</li>
+                    <li>Open <code class="mono">chrome://extensions</code>, enable <strong>Developer mode</strong>.</li>
+                    <li><strong>Load unpacked</strong> → pick the folder containing <code class="mono">manifest.json</code>.</li>
+                    <li>Join a Meet and turn on <strong>live captions</strong> (<code class="mono">CC</code>).</li>
+                  </ol>
+                </div>
+              </section>
+
+              <section class="card">
+                <div class="card-head"><h2>Nothing appearing?</h2></div>
+                <div class="card-body">
+                  <ul class="small" style="line-height: 1.9; padding-left: 18px; margin: 0; color: var(--muted)">
+                    <li>Captions must be <strong>on</strong> in Meet — nothing is captured without them.</li>
+                    <li>A <code class="mono">!</code> badge on the extension icon means POSTs are failing. Check the server is up.</li>
+                    <li>Pick the right meeting from the dropdown; the view is per-meeting.</li>
+                    <li>Summaries need an API key, or the heuristic fallback enabled in Settings.</li>
+                  </ul>
+                </div>
+              </section>
+            </div>
+
+            <section class="card">
+              <div class="card-head"><h2>Server health</h2><button class="link" id="refreshHealth">Re-check</button></div>
+              <div class="card-body"><div id="healthBody" class="small"></div></div>
+            </section>
+          </section>
+        </main>
+
+        <footer class="app-footer">
+          <span>© <span id="year">2025</span> MeetingIQ. All rights reserved.</span>
+          <nav>
+            <a href="/">Landing page</a>
+            <a href="https://github.com/ksilenteye/MeetingIQ" target="_blank" rel="noopener">Source</a>
+            <a href="/health">Status</a>
+          </nav>
+        </footer>
+      </div>
+    </div>
+
+    <!-- New Meeting modal: there is no "create a meeting" server-side, so this
+         explains the real flow rather than pretending to schedule something. -->
+    <div class="modal-backdrop" id="newMeetingModal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="newMeetingTitle">
+        <div class="card-head">
+          <h2 id="newMeetingTitle">Start capturing a meeting</h2>
+          <button class="icon-btn" id="closeModal" aria-label="Close">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" /></svg>
+          </button>
+        </div>
+        <div class="card-body stack">
+          <p class="small">
+            Meetings are created by capture, not scheduled here. Join a Google Meet with the
+            extension installed and live captions on — the meeting appears in this dashboard as
+            soon as the first caption arrives.
+          </p>
+          <div class="field">
+            <label for="jumpMeeting">Already have a meeting id?</label>
+            <input id="jumpMeeting" type="text" placeholder="e.g. jrf-ttqe-dxu" />
+          </div>
+          <div class="row" style="justify-content: flex-end">
+            <a class="btn btn-ghost" href="/api/extension.zip" download>Get extension</a>
+            <button class="btn btn-primary" id="jumpBtn">Open transcript</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <script src="/static/js/app.js"></script>
+  </body>
+</html>

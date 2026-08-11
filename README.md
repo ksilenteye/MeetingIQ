@@ -7,7 +7,7 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688?style=flat&logo=fastapi&logoColor=white)
 ![Chrome MV3](https://img.shields.io/badge/Chrome-Manifest%20V3-4285F4?style=flat&logo=googlechrome&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-003B57?style=flat&logo=sqlite&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-193%20py%20%2B%2096%20js-brightgreen?style=flat)
+![Tests](https://img.shields.io/badge/tests-231%20py%20%2B%20137%20js-brightgreen?style=flat)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat)
 
 ---
@@ -58,7 +58,7 @@ The last released version worked, but lost captions, produced stub-sized RAG chu
 
 ### Testing
 
-- **289 tests, added from zero** — 193 pytest (`backend/tests/`) covering the API layer, chunking, cleaning, config policy, routing, retrieval and LLM fallbacks; 96 `node --test` (`extension/tests/`) covering helpers, caption-root scoring, and `content.js` itself booted in a vm against a fake page and a virtual clock.
+- **368 tests, added from zero** — 231 pytest (`backend/tests/`) covering the API layer, chunking, cleaning, config policy, routing, retrieval and LLM fallbacks; 137 `node --test` (`extension/tests/`) covering helpers, caption-root scoring, and `content.js` itself booted in a vm against a fake page and a virtual clock.
 - No API key, no network, no jsdom, no browser required for any of them.
 
 ---
@@ -130,8 +130,12 @@ MeetingIQ/
 │   │   └── llm/
 │   │       ├── llm_client.py      # Thin OpenAI wrapper
 │   │       └── prompt_builder.py  # build_prompt(context, question)
-│   ├── static/index.html          # Dashboard UI (served at GET /)
-│   └── tests/                     # 193 pytest tests
+│   ├── static/
+│   │   ├── landing.html           # Marketing page (served at GET /)
+│   │   ├── app.html               # Dashboard SPA (served at GET /app)
+│   │   ├── css/theme.css          # Shared tokens; landing.css + app.css set light/dark
+│   │   └── js/                    # landing.js, app.js — no build step, no framework
+│   └── tests/                     # 231 pytest tests
 └── extension/
     ├── manifest.json              # MV3 declaration
     ├── utils.js                   # Shared helpers
@@ -140,7 +144,7 @@ MeetingIQ/
     ├── background.js              # Service worker — persistent queue + retry
     ├── popup.html / popup.js      # On/off toggle
     ├── styles/inject.css
-    └── tests/                     # 96 node --test tests
+    └── tests/                     # 137 node --test tests
 ```
 
 Manifest load order is `utils.js` → `caption-heuristics.js` → `content.js`, and it matters: `content.js` hard-depends on the heuristics module and stays idle with a `console.error` if it is missing.
@@ -190,7 +194,8 @@ python -m uvicorn main:app --reload --port 8000
 > `python -m uvicorn` form above (same for `python -m pytest`), or activate a venv, which
 > puts that folder on `PATH` for the session.
 
-Dashboard is now live at **http://localhost:8000**.
+The landing page is now live at **http://localhost:8000**, and the dashboard at
+**http://localhost:8000/app**.
 
 First start creates `transcripts.db`, applies migrations, rehydrates the vector index and backfills any transcripts already in the database — so it can take a few seconds before `/health` reports `meeting_assistant_ready: true`.
 
@@ -211,7 +216,9 @@ Open any Google Meet and turn on **Live captions** (the `CC` button) — nothing
 
 ### 5. Ask questions
 
-In the dashboard: paste or pick the meeting ID, choose a provider, paste an API key (or tick **Allow heuristic fallback**), pick **Summarise** or **Q&A**, and hit **Run Action**.
+In the dashboard (`/app`): set your provider and API key once under **Settings** — they are kept in `localStorage` and sent per request, never stored server-side. Then either open **Summaries**, pick a meeting and hit **Generate**, or open **Transcripts** and use **Ask about this meeting**. With no key set, both fall back to the heuristic path as long as **Allow the heuristic fallback** stays ticked.
+
+The dashboard's other views are all read models over the same database: **Meetings** (duration and participants per meeting), **Action Items** (bullets extracted from summaries you have already generated), and **Insights** (talk-time split, lines per day, AI usage).
 
 ### Verify the whole chain
 
@@ -304,8 +311,30 @@ The threshold only applies when real embeddings are in use. Without `sentence-tr
 |---|---|---|
 | `POST` | `/transcript` | Ingest a batch of caption lines |
 | `GET` | `/api/transcripts` | Fetch recent lines for a meeting |
-| `GET` | `/api/meetings` | List meetings present in the database |
+| `GET` | `/api/meetings` | List meetings, each with duration, participants and line count |
 | `WS` | `/ws/transcripts` | Live broadcast stream |
+
+### Dashboard read models
+
+Aggregates over the same tables — every figure is counted, never modelled.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/stats` | Meeting / line / speaker totals, captured seconds, AI-run counts, index size |
+| `GET` | `/api/insights` | Talk-time by speaker, lines per day, provider mix; optional `meeting_id` |
+| `GET` | `/api/action-items` | Action items extracted from stored summaries; optional `meeting_id` |
+
+### Pages
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/` | Landing page |
+| `GET` | `/app` | Dashboard |
+| `GET` | `/demo.mp4` | Demo recording for the landing page's player; `404` when the file isn't deployed |
+
+`/demo.mp4` serves `DEMO.mp4` from the repo root with Range support, so the player can seek. The page attaches the `<video>` on click rather than preloading it, so visiting the landing page costs nothing for anyone who does not watch. `/health` reports `demo_video_available` so you can tell before a visitor finds a dead play button.
+
+`/api/action-items` re-reads text an LLM already wrote — it never runs a second inference pass. It returns bullets sitting under an *Action items* / *Next steps* heading, plus bullets that read like an assignment, tagged `source: "section"` or `"heuristic"`. An empty list means no summaries have been generated yet, not that a meeting produced no actions.
 
 ### LLM Actions
 
@@ -409,11 +438,11 @@ __meetTranscript.candidates()    // score the current page right now
 ```bash
 cd backend
 pip install -r requirements-dev.txt
-python -m pytest                                       # 193 tests
+python -m pytest                                       # 231 tests
 python -m pytest tests/test_processor.py -k accumulation -v   # single file / pattern
 
 cd ..
-node --test extension/tests/*.test.mjs                 # 96 tests, no deps
+node --test extension/tests/*.test.mjs                 # 137 tests, no deps
 ```
 
 Nothing here needs an API key or a network connection. The extension tests have no dependencies either — caption-root selection runs against fake elements, and `content.js` itself is booted in a vm with a fake page, fake `chrome.*` and a virtual clock, so debounce/throttle timings run deterministically. There is no jsdom and no browser involved.
@@ -514,7 +543,7 @@ pytest>=8.0.0
 - [ ] Streaming LLM responses via WebSocket (server-sent events)
 - [ ] Configurable backend URL in the extension popup
 - [ ] Async embedding queue for large transcript backlogs
-- [ ] Speaker time-series analytics in dashboard
+- [x] Speaker talk-time and capture-volume analytics in the dashboard
 - [ ] Export transcript + summary as PDF / DOCX
 - [ ] Docker Compose setup for one-command deployment
 - [ ] Support for additional LLM providers

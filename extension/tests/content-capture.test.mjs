@@ -29,6 +29,11 @@ function el(attrs, text, rect) {
   return {
     attrs,
     innerText: text,
+    // the wide-pool pre-filter reads textContent, which in a real DOM is the
+    // same characters without layout; mirroring innerText is faithful enough
+    get textContent() {
+      return this.innerText;
+    },
     isConnected: true,
     style: { display: 'block', visibility: 'visible', opacity: '1' },
     classList: { toggle() {} },
@@ -43,6 +48,17 @@ function el(attrs, text, rect) {
 
 const captionEl = (text) => el({ 'aria-live': 'polite' }, text, CAPTION_RECT);
 const toastEl = (text) => el({ 'aria-live': 'polite', role: 'status' }, text, TOAST_RECT);
+
+/**
+ * Meet's current caption markup: no aria-live anywhere, the text sitting under
+ * a role="region" wrapper. Probed on a live call — the whole page held two
+ * [aria-live]/[role=log|status] elements and both were notifications, while the
+ * caption text lived in an attribute-less div two levels under this landmark.
+ */
+const regionCaptionEl = (text) => el({ role: 'region' }, text, CAPTION_RECT);
+
+/** A participant name tile: no markup, real text, low on screen. Scored 44 live. */
+const nameTileEl = (name) => el({ jsname: '' }, `${name}\n${name}`, CAPTION_RECT);
 
 /**
  * Boots content.js against a controllable fake page.
@@ -70,6 +86,7 @@ function boot(initialElements) {
   const matchers = {
     '[aria-live="polite"], [aria-live="assertive"]': (e) => e.attrs['aria-live'] === 'polite' || e.attrs['aria-live'] === 'assertive',
     '[role="log"], [role="status"]': (e) => e.attrs.role === 'log' || e.attrs.role === 'status',
+    '[role="region"]': (e) => e.attrs.role === 'region',
     '[jsname], [data-message-text], [data-message-id]': (e) => 'jsname' in e.attrs || 'data-message-text' in e.attrs || 'data-message-id' in e.attrs,
   };
 
@@ -244,6 +261,72 @@ describe('content.js: startup', () => {
     const app = boot([captionEl(LONG_TURN[0])]);
     app.advance(700);
     assert.equal(app.state().debugEnabled, false);
+  });
+});
+
+describe('content.js: Meet without live-region caption markup', () => {
+  test('binds a role=region caption box when no aria-live exists anywhere', () => {
+    const caption = regionCaptionEl(LONG_TURN[0]);
+    const app = boot([caption]);
+    app.advance(700);
+    assert.deepEqual(app.boundTargets(), [caption]);
+  });
+
+  test('captures speech from it', () => {
+    const caption = regionCaptionEl('');
+    const app = boot([caption]);
+    app.advance(700);
+    for (const text of LONG_TURN) frame(app, caption, text);
+    app.advance(2000);
+    const said = app.items().map((i) => i.text).join(' ');
+    assert.ok(said.length > 0, 'nothing captured from a role=region caption box');
+  });
+
+  test('prefers the caption box over participant name tiles', () => {
+    // the observed failure: name tiles scored 44 and won by default because the
+    // caption box was never in the candidate pool at all
+    const caption = regionCaptionEl(LONG_TURN[2]);
+    const app = boot([nameTileEl('Kavya Bhardwaj'), caption, nameTileEl('Kavya Bhardwaj')]);
+    app.advance(700);
+    assert.deepEqual(app.boundTargets(), [caption]);
+  });
+
+  test('a caption box far past the wide-pool cap is still found', () => {
+    // measured live: index 484 of a 538-element [jsname] pool, against a cap of
+    // 80. Document-order slicing threw it away before anything was scored.
+    const filler = Array.from({ length: 300 }, (_, i) =>
+      el({ jsname: '' }, `filler block number ${i} with enough text to pass the pre-filter`, TOAST_RECT)
+    );
+    const caption = el({ jsname: '' }, LONG_TURN[2], CAPTION_RECT);
+    const app = boot([...filler, caption]);
+    app.advance(700);
+    assert.deepEqual(app.boundTargets(), [caption]);
+  });
+
+  test('abandons a root that has dropped out of the candidate pool', () => {
+    // end-to-end shape of the live failure: bound to an element that still
+    // exists but matches no selector, while the caption box is discoverable
+    const stale = el({ role: 'region' }, 'some panel text that was viable earlier', CAPTION_RECT);
+    const app = boot([stale]);
+    app.advance(700);
+    assert.deepEqual(app.boundTargets(), [stale]);
+
+    // Meet strips the attribute; the node stays in the DOM but is undiscoverable
+    delete stale.attrs.role;
+    const caption = regionCaptionEl(LONG_TURN[2]);
+    app.setElements([stale, caption]);
+    app.advance(3000);
+    assert.deepEqual(app.boundTargets(), [caption]);
+  });
+
+  test('empty jsname nodes do not consume the cap', () => {
+    // the pre-filter runs on textContent so blank wrappers never crowd out the
+    // caption box the way raw document order did
+    const blanks = Array.from({ length: 500 }, () => el({ jsname: '' }, '', TOAST_RECT));
+    const caption = el({ jsname: '' }, LONG_TURN[2], CAPTION_RECT);
+    const app = boot([...blanks, caption]);
+    app.advance(700);
+    assert.deepEqual(app.boundTargets(), [caption]);
   });
 });
 

@@ -110,6 +110,38 @@ const TOAST_FIXTURES = [
   'Dismiss\nThis meeting is being recorded',
 ];
 
+/**
+ * (d) Meet's sharing / device panel, captured verbatim from a live session
+ * where it beat the caption box and became the bound root. It has no colon
+ * captions, so the `captionLines > 0` guard does not protect against it, and
+ * its "button label / description line" shape is the same shape as Meet's
+ * speaker-label caption layout — so every per-line check scored it as speech.
+ * Measured before the fix: panel 129 vs caption box 137, a margin held only by
+ * `horizontally-centred`, which the caption box loses in a narrow window.
+ */
+const SHARING_PANEL = [
+  'Add others',
+  'Or share this meeting link with others you want in the meeting',
+  'Stop sharing',
+  'Waiting for Read AI to be connected',
+  "You're no longer sharing audio and video with Read AI",
+  'Your microphone is on.',
+  'Microphone (2- Realtek(R) Audio)',
+  'Array (2- Realtek(R) Audio)',
+].join('\n');
+
+/**
+ * The caption box from that same session. Meet was rendering the speaker-label
+ * layout (name on its own line, speech beneath) rather than "Speaker: text",
+ * so this must survive every rule added to catch the panel above.
+ */
+const LABEL_LAYOUT_CAPTIONS = [
+  'Kavya Bhardwaj',
+  "Sending anything. Or working, not any caption. Let me just. So? Hello! Now, let's take it to Sparky now.",
+  'You',
+  "Hello! Yeah, so it's. Working, I think. And it should start. Catching the phrase, but I don't think it is scrolling.",
+].join('\n');
+
 /** (c) Two speakers alternating quickly; Meet shows the last couple of lines. */
 const ALTERNATION_FRAMES = [
   'Alice Chen: so the migration',
@@ -517,6 +549,231 @@ describe('notification text is excluded, real speech is not', () => {
       assert.equal(H.isLikelySpokenText(line), true);
     });
   }
+});
+
+describe("scenario (d): Meet's sharing / device panel", () => {
+  test('the panel is disqualified, not merely out-scored', () => {
+    const scored = scoreOf(toast(SHARING_PANEL));
+    assert.equal(scored.notification, true);
+    assert.equal(scored.score, H.DISQUALIFIED);
+  });
+
+  test('the caption box beside it is untouched and still binds', () => {
+    const scored = scoreOf(captionBox(LABEL_LAYOUT_CAPTIONS));
+    assert.equal(scored.notification, false);
+    assert.ok(
+      scored.score >= H.MIN_ACCEPT_SCORE,
+      `speaker-label captions scored ${scored.score}`
+    );
+  });
+
+  test('with nothing bound, the captions are chosen over the panel', () => {
+    const decision = H.createRootArbiter().evaluate({
+      bound: null,
+      candidates: [
+        candidate('panel', toast(SHARING_PANEL)),
+        candidate('captions', captionBox(LABEL_LAYOUT_CAPTIONS)),
+      ],
+    });
+    assert.equal(decision.key, 'captions');
+  });
+
+  test('the panel never takes a binding it already holds nothing on', () => {
+    // the observed failure: the panel wins first and keeps winning
+    const arbiter = H.createRootArbiter();
+    for (let tick = 0; tick < 20; tick += 1) {
+      const decision = arbiter.evaluate({
+        bound: { key: 'captions', score: scoreOf(captionBox(LABEL_LAYOUT_CAPTIONS)).score, attached: true },
+        candidates: [
+          candidate('captions', captionBox(LABEL_LAYOUT_CAPTIONS)),
+          candidate('panel', toast(SHARING_PANEL)),
+        ],
+      });
+      assert.equal(decision.action, 'keep', `tick ${tick} switched to ${decision.key}`);
+    }
+  });
+
+  test('the panel alone binds nothing at all', () => {
+    const decision = H.createRootArbiter().evaluate({
+      bound: null,
+      candidates: [candidate('panel', toast(SHARING_PANEL))],
+    });
+    assert.equal(decision.action, 'idle');
+    assert.equal(decision.reason, 'no-viable-candidate');
+  });
+
+  test('no line of it can be emitted as a caption', () => {
+    const parsed = H.selectBestCaptionCandidate(H.extractLines(SHARING_PANEL), 'Kavya Bhardwaj');
+    assert.equal(parsed, null, `panel produced a caption: ${JSON.stringify(parsed)}`);
+  });
+
+  test('its button labels are never speakers', () => {
+    for (const label of ['Add others', 'Stop sharing', 'Jump to bottom']) {
+      assert.equal(H.isPlausibleSpeakerName(label), false, label);
+      assert.equal(H.isLikelySpeakerLabel(label), false, label);
+    }
+  });
+
+  test('two whole-line button labels mark a block as UI on their own', () => {
+    // no notification phrasing anywhere in it — the shape alone must be enough
+    const bare = ['Add others', 'Some ordinary sentence of text here', 'Stop sharing'].join('\n');
+    assert.equal(H.looksLikeNotificationBlock(H.extractLines(bare)), true);
+  });
+
+  test('one button label in a long block is not enough on its own', () => {
+    // guards the rule above from swallowing a caption box that happens to
+    // contain a single short line matching a control label
+    const captions = [
+      'Alice Chen: we should close the loop on that before Friday',
+      'Bob Iyer: agreed, I will send the summary tonight',
+      'Done',
+    ].join('\n');
+    assert.equal(H.looksLikeNotificationBlock(H.extractLines(captions)), false);
+  });
+});
+
+describe('device and sharing chrome is excluded, similar speech is not', () => {
+  const excluded = [
+    'Your microphone is on.',
+    'Microphone (2- Realtek(R) Audio)',
+    'Array (2- Realtek(R) Audio)',
+    "You're no longer sharing audio and video with Read AI",
+    'Or share this meeting link with others you want in the meeting',
+    'Waiting for Read AI to be connected',
+  ];
+  for (const line of excluded) {
+    test(`excluded: "${line}"`, () => {
+      assert.equal(H.isNotificationLine(line), true);
+      assert.equal(H.isLikelySpokenText(line), false);
+    });
+  }
+
+  // "on" is only a notification at the end of the line; these say the same
+  // words in the middle of real sentences and must survive.
+  const speech = [
+    'your microphone is on the table next to the laptop',
+    'I think your microphone is on mute again',
+    'we are sharing audio and video with the whole team now',
+    'can you share this meeting recording with the design folks',
+  ];
+  for (const line of speech) {
+    test(`kept: "${line}"`, () => {
+      assert.equal(H.isNotificationLine(line), false, 'flagged as a notification');
+      assert.equal(H.isLikelySpokenText(line), true);
+    });
+  }
+});
+
+/**
+ * (e) Meet's accessibility announcer, captured verbatim from a second live
+ * session. A different element from the sharing panel in (d) — no button
+ * labels, no speaker at all, so every row landed under speaker "Unknown".
+ * Measured before the fix: ELIGIBLE at 119, and it emitted.
+ */
+const A11Y_ANNOUNCER = [
+  'Raise hand (ctrl + alt + h)',
+  'You reacted with 👍.',
+  'Looking for others in the call...',
+  'No one else is here',
+  'Press Down Arrow to open the hover tray and Escape to close it.',
+].join('\n');
+
+describe("scenario (e): Meet's accessibility announcer", () => {
+  test('the announcer block is disqualified', () => {
+    const scored = scoreOf(toast(A11Y_ANNOUNCER));
+    assert.equal(scored.notification, true);
+    assert.equal(scored.score, H.DISQUALIFIED);
+  });
+
+  test('no line of it can be emitted as a caption', () => {
+    const parsed = H.selectBestCaptionCandidate(H.extractLines(A11Y_ANNOUNCER), 'Kavya Bhardwaj');
+    assert.equal(parsed, null, `announcer produced a caption: ${JSON.stringify(parsed)}`);
+  });
+
+  test('it loses to the caption box with nothing bound', () => {
+    const decision = H.createRootArbiter().evaluate({
+      bound: null,
+      candidates: [
+        candidate('announcer', toast(A11Y_ANNOUNCER)),
+        candidate('captions', captionBox(LABEL_LAYOUT_CAPTIONS)),
+      ],
+    });
+    assert.equal(decision.key, 'captions');
+  });
+});
+
+describe('announcer chrome is excluded, similar speech is not', () => {
+  const excluded = [
+    'Raise hand (ctrl + alt + h)',
+    'You reacted with 👍.',
+    'Looking for others in the call...',
+    'No one else is here',
+    'Press Down Arrow to open the hover tray and Escape to close it.',
+  ];
+  for (const line of excluded) {
+    test(`excluded: "${line}"`, () => {
+      assert.equal(H.isNotificationLine(line), true);
+    });
+  }
+
+  // Anchored at line start, so the same words mid-sentence stay speech.
+  const speech = [
+    'I think we should press ahead with the launch next week',
+    'can you raise hand if you have seen the new dashboard',
+    'no one else is here yet so let us start with the roadmap',
+    'she reacted with genuine surprise when we showed her the numbers',
+  ];
+  for (const line of speech) {
+    test(`kept: "${line}"`, () => {
+      assert.equal(H.isNotificationLine(line), false, 'flagged as a notification');
+      assert.equal(H.isLikelySpokenText(line), true);
+    });
+  }
+});
+
+describe('a bound root that discovery can no longer find', () => {
+  // Observed live: the popup reported `bound c60`, c60 absent from a 5-element
+  // candidate list, and the real caption box sitting unbound at 52. The margin
+  // rule was defending a leftover against the only element still discoverable.
+  const leftover = { key: 'c60', score: 44, attached: true, discoverable: false };
+  const captionBox = { key: 'captions', score: 52 };
+
+  test('is replaced immediately, without waiting for corroboration', () => {
+    const decision = H.createRootArbiter().evaluate({
+      bound: leftover,
+      candidates: [captionBox],
+    });
+    assert.equal(decision.action, 'bind');
+    assert.equal(decision.key, 'captions');
+    assert.equal(decision.reason, 'bound-root-undiscoverable');
+  });
+
+  test('is kept when there is nothing viable to replace it with', () => {
+    const decision = H.createRootArbiter().evaluate({
+      bound: leftover,
+      candidates: [{ key: 'toast', score: 300, notification: true }],
+    });
+    assert.equal(decision.action, 'keep');
+  });
+
+  test('a discoverable root is still defended by the switch margin', () => {
+    // the regression guard: this is the rule that stops a toast flapping the
+    // binding away from a working caption box
+    const decision = H.createRootArbiter().evaluate({
+      bound: { key: 'captions', score: 44, attached: true, discoverable: true },
+      candidates: [{ key: 'other', score: 52 }],
+    });
+    assert.equal(decision.action, 'keep');
+    assert.equal(decision.reason, 'challenger-within-margin');
+  });
+
+  test('callers that omit the flag keep the old behaviour', () => {
+    const decision = H.createRootArbiter().evaluate({
+      bound: { key: 'captions', score: 44, attached: true },
+      candidates: [{ key: 'other', score: 52 }],
+    });
+    assert.equal(decision.action, 'keep');
+  });
 });
 
 describe('extractLines', () => {

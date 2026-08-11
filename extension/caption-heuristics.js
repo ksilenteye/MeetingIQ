@@ -53,6 +53,11 @@
     'end call', 'mute', 'unmute', 'pin', 'unpin', 'admit', 'admit all',
     'deny entry', 'join now', 'ask to join', 'present now', 'raise hand',
     'stop presenting', 'switch here', 'copy link', 'copy joining info',
+    // Sharing / participant panel controls. Observed being recorded as the
+    // speaker of Meet's own panel text ("Add others", "Stop sharing").
+    'add others', 'add people', 'invite', 'share screen', 'share this screen',
+    'stop sharing', 'stop sharing screen', 'present to everyone',
+    'jump to bottom', 'start recording', 'stop recording', 'record meeting',
   ]);
 
   /**
@@ -72,6 +77,13 @@
     /^(microphone|camera|speakers?) (not found|unavailable|blocked)$/i,
     /\b(mic(rophone)?|camera) (turned|switched) (on|off)\b/i,
     /\bcheck your (audio|video|mic(rophone)?|camera)\b/i,
+    // "on" only at end of line: "your microphone is on the table" is speech.
+    /\byour mic(rophone)? is on[.!]?$/i,
+    /\byour mic(rophone)? is unmuted\b/i,
+    // Device-picker entries: "Microphone (2- Realtek(R) Audio)". Matches to the
+    // last paren rather than the first — device names nest their own, as in
+    // "Realtek(R)", and [^)] would stop inside them.
+    /^[\p{L}][\p{L}\d ]{0,39}\(\d+-\s?.{1,60}\)$/u,
 
     // Join / leave banners. Anchored to a plausible Title-Case name, and
     // excluding pronoun subjects, so that "I joined the call" or "she joined
@@ -94,6 +106,9 @@
     /\byou(?:'| a)?re presenting to everyone\b/i,
     /\byou(?:'ve| have)? ?stopped presenting\b/i,
     /\b(started|stopped) presenting\b/i,
+    /\byou(?:'| a)?re no longer sharing\b/i,
+    /\bshare this meeting link\b/i,
+    /^waiting for .{1,60} to be connected$/i,
 
     // Recording / captions / transcript
     /\bthis (meeting|call) is being recorded\b/i,
@@ -107,6 +122,18 @@
     /\b(poor|unstable) (network|connection)\b/i,
     /^reconnecting\b/i,
     /\byou(?:'ve| have)? ?been disconnected\b/i,
+
+    // Accessibility announcer: keyboard hints, hover-tray tips, reaction and
+    // participant status. Meet routes these through an aria-live region with
+    // the same markup as the caption box, and none of them carry a speaker.
+    /\(\s*(ctrl|control|alt|option|shift|cmd|command|win|⌘)\s*\+/i,
+    /^press .{1,40} to \w/i,
+    /^(use|hit) the .{1,40} (key|button) to \w/i,
+    /^you reacted with\b/i,
+    /\blooking for others in (the|this) call\b/i,
+    /^no one else is here$/i,
+    /^(waiting|looking) for (others|someone|people)\b/i,
+    /^\d+ (person|people|participants?) in (the|this) call$/i,
 
     // Meeting chrome
     /\bcopy joining info\b/i,
@@ -259,7 +286,9 @@
    * Two independent signals, either of which is enough:
    *  - the block contains Meet notification text and no caption content, or
    *  - the block is small, carries a dismiss-button label, and contains no
-   *    "Speaker: text" line (the shape of every Meet snackbar).
+   *    "Speaker: text" line (the shape of every Meet snackbar), or
+   *  - the block reads as a control panel: two or more whole-line button
+   *    labels and no caption content.
    */
   function looksLikeNotificationBlock(lines) {
     const ls = (lines || []).filter(Boolean);
@@ -269,8 +298,15 @@
 
     if (countNotificationLines(ls) > 0) return true;
 
-    const hasDismissControl = ls.some((l) => isUiControlLabel(l));
-    if (hasDismissControl && ls.length <= 4) return true;
+    const controlLabels = ls.filter((l) => isUiControlLabel(l)).length;
+    if (controlLabels > 0 && ls.length <= 4) return true;
+
+    // Meet's sharing / device panels interleave a button label with a line of
+    // descriptive text, which is exactly the shape of its speaker-label caption
+    // layout — so the per-line checks score them as captions and the panel wins
+    // the root contest. A caption box never contains two whole-line button
+    // labels, no matter how long the conversation runs; a panel always does.
+    if (controlLabels >= 2) return true;
 
     // Entirely UI chrome with nothing spoken in it.
     const chrome = ls.filter((l) => isUiChromeLine(l)).length;
@@ -511,6 +547,24 @@
           }
           return {
             action: 'unbind', key: null, score: null, reason: 'bound-root-detached-no-replacement', streak: 0, challenger: null,
+          };
+        }
+
+        // A root that discovery can no longer find is a leftover, not a rival.
+        // The switch margin exists to stop flapping between comparable
+        // candidates; applying it here let an element that matches no selector
+        // any more hold the binding indefinitely while the real caption box sat
+        // in the candidate list unbound. Only an explicit false triggers this —
+        // callers that omit the flag keep the previous behaviour.
+        if (bound.discoverable === false && best) {
+          clearChallenger();
+          return {
+            action: 'bind',
+            key: best.key,
+            score: best.score,
+            reason: 'bound-root-undiscoverable',
+            streak: 0,
+            challenger: best,
           };
         }
 

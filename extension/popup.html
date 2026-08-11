@@ -28,6 +28,41 @@
         margin: 10px 0 0;
         line-height: 1.4;
       }
+      .diag {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid #e3e3e3;
+        font-size: 12px;
+      }
+      .diag h2 {
+        font-size: 12px;
+        margin: 0 0 6px;
+        font-weight: 600;
+      }
+      .diag .row {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        line-height: 1.6;
+      }
+      .diag .row b {
+        font-weight: 600;
+      }
+      .ok {
+        color: #0a7d47;
+      }
+      .bad {
+        color: #b3261e;
+      }
+      .warn {
+        color: #8a5a00;
+      }
+      .hint {
+        font-size: 11px;
+        color: #666;
+        margin-top: 8px;
+        line-height: 1.45;
+      }
     </style>
   </head>
   <body>
@@ -39,6 +74,24 @@
     <!-- data-meetingiq="api-url" is rewritten by GET /api/extension.zip; see background.js -->
     <p>Enable live captions in Meet. Data posts to
       <code data-meetingiq="api-url">http://localhost:8000/transcript</code>.</p>
+
+    <!-- Self-test. The popup loads the same caption-heuristics.js Chrome loaded,
+         so this reports the code actually running, not what is on disk. -->
+    <div class="diag">
+      <h2>Caption filters</h2>
+      <div id="selfTest"></div>
+      <h2 style="margin-top: 10px">Bound on this tab</h2>
+      <div id="boundState">checking…</div>
+      <h2 style="margin-top: 10px">Locate the caption box</h2>
+      <button id="probeBtn" style="font-size: 11px; padding: 3px 8px; cursor: pointer">
+        Find caption element
+      </button>
+      <div id="probeOut" class="hint"></div>
+      <div class="hint" id="diagHint"></div>
+    </div>
+
+    <script src="utils.js"></script>
+    <script src="caption-heuristics.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

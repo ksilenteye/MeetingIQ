@@ -231,6 +231,182 @@ class TestHealth:
 
 
 # --------------------------------------------------------------------------- #
+# dashboard read models
+#
+# Every figure the dashboard shows is counted from rows. These pin the counting
+# rules, because a stat tile that silently starts estimating is indistinguishable
+# from one that is right.
+# --------------------------------------------------------------------------- #
+
+
+class TestPages:
+    def test_root_serves_the_landing_page(self, client):
+        body = client.get("/").text
+        assert "Smarter Meetings" in body
+        assert '/app' in body  # the CTA into the dashboard
+
+    def test_app_serves_the_dashboard(self, client):
+        assert 'data-view="dashboard"' in client.get("/app").text
+
+    def test_static_assets_are_mounted(self, client):
+        assert client.get("/static/css/theme.css").status_code == 200
+        assert client.get("/static/js/app.js").status_code == 200
+
+
+class TestDemoVideo:
+    """
+    Never points at the real recording — it is ~1 GB, and a test that reads it
+    would dominate the suite's runtime.
+    """
+
+    @pytest.fixture
+    def stub_video(self, tmp_path, monkeypatch):
+        path = tmp_path / "DEMO.mp4"
+        path.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"payload" * 100)
+        monkeypatch.setattr(main, "DEMO_VIDEO", path)
+        return path
+
+    def test_serves_the_file_as_video(self, client, stub_video):
+        r = client.get("/demo.mp4")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "video/mp4"
+        assert r.content == stub_video.read_bytes()
+
+    def test_range_requests_are_supported(self, client, stub_video):
+        """The moov atom is at the end of the real file, so the browser seeks."""
+        r = client.get("/demo.mp4", headers={"Range": "bytes=0-7"})
+        assert r.status_code == 206
+        assert r.content == b"\x00\x00\x00\x18"[:4] + b"ftyp"
+        assert r.headers["content-range"].startswith("bytes 0-7/")
+
+    def test_missing_file_404s_instead_of_erroring(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(main, "DEMO_VIDEO", tmp_path / "absent.mp4")
+        assert client.get("/demo.mp4").status_code == 404
+
+    def test_health_reports_availability(self, client, stub_video):
+        assert client.get("/health").json()["demo_video_available"] is True
+
+
+class TestMeetingListing:
+    def test_duration_spans_first_to_last_caption(self, client):
+        client.post(
+            "/transcript",
+            json={
+                "meeting_id": "m1",
+                "items": [
+                    item("start", ts="2026-07-30T10:00:00Z"),
+                    item("end", speaker="Bob", ts="2026-07-30T10:45:00Z"),
+                ],
+            },
+        )
+        m = client.get("/api/meetings").json()["items"][0]
+        assert m["duration_seconds"] == 45 * 60
+        assert m["speaker_count"] == 2
+        assert sorted(m["speakers"]) == ["Alice", "Bob"]
+
+    def test_unparseable_timestamps_yield_zero_not_an_error(self, client):
+        client.post(
+            "/transcript",
+            json={"meeting_id": "m1", "items": [item("x", ts="not-a-date")]},
+        )
+        assert client.get("/api/meetings").json()["items"][0]["duration_seconds"] == 0
+
+
+class TestStats:
+    def test_counts_rows_and_sums_each_meeting_span_separately(self, client):
+        for meeting in ("m1", "m2"):
+            client.post(
+                "/transcript",
+                json={
+                    "meeting_id": meeting,
+                    "items": [
+                        item("a", ts="2026-07-30T10:00:00Z"),
+                        item("b", speaker="Bob", ts="2026-07-30T10:10:00Z"),
+                    ],
+                },
+            )
+        body = client.get("/api/stats").json()
+        assert body["total_meetings"] == 2
+        assert body["total_lines"] == 4
+        assert body["total_speakers"] == 2
+        # the two meetings overlap in wall-clock time and still count once each
+        assert body["captured_seconds"] == 2 * 600
+
+    def test_empty_database_reports_zeroes(self, client):
+        body = client.get("/api/stats").json()
+        assert body["total_meetings"] == 0
+        assert body["captured_seconds"] == 0
+        assert body["indexed_chunks"] == 0
+
+
+class TestInsights:
+    def test_speaker_shares_are_relative_to_the_returned_rows(self, client):
+        client.post(
+            "/transcript",
+            json={
+                "meeting_id": "m1",
+                "items": [item("one two three four"), item("five", speaker="Bob")],
+            },
+        )
+        speakers = {s["speaker"]: s for s in client.get("/api/insights").json()["speakers"]}
+        assert speakers["Alice"]["words"] == 4
+        assert speakers["Bob"]["words"] == 1
+        assert round(sum(s["share"] for s in speakers.values())) == 100
+
+    def test_meeting_id_scopes_every_section(self, client):
+        client.post("/transcript", json={"meeting_id": "m1", "items": [item("mine")]})
+        client.post(
+            "/transcript",
+            json={"meeting_id": "m2", "items": [item("theirs", speaker="Bob")]},
+        )
+        body = client.get("/api/insights", params={"meeting_id": "m1"}).json()
+        assert [s["speaker"] for s in body["speakers"]] == ["Alice"]
+
+
+class TestActionItems:
+    def summarised(self, client, result, meeting_id="m1"):
+        main.save_llm_history(meeting_id, "summarize", None, result, used_llm=True)
+
+    def test_bullets_under_an_action_heading_are_taken_verbatim(self, client):
+        self.summarised(
+            client,
+            "Key points\n- we shipped the thing\n\nAction Items\n- Alex: send the deck\n- book a room\n",
+        )
+        items = client.get("/api/action-items").json()["items"]
+        texts = [i["text"] for i in items]
+        assert "Alex: send the deck" in texts
+        assert "book a room" in texts
+        # a blank line inside the section must not close it
+        assert all(i["source"] == "section" for i in items if i["text"] == "book a room")
+
+    def test_bullets_elsewhere_need_action_phrasing(self, client):
+        self.summarised(client, "Notes\n- the weather was fine\n- Priya will prepare the report\n")
+        items = client.get("/api/action-items").json()["items"]
+        assert [i["text"] for i in items] == ["Priya will prepare the report"]
+        assert items[0]["source"] == "heuristic"
+        assert items[0]["owner"] == "Priya"
+
+    def test_a_later_heading_closes_the_action_section(self, client):
+        self.summarised(client, "Action Items\n- send the deck\n\nAttendees\n- the weather was fine\n")
+        assert [i["text"] for i in client.get("/api/action-items").json()["items"]] == [
+            "send the deck"
+        ]
+
+    def test_only_the_newest_summary_per_meeting_is_used(self, client):
+        self.summarised(client, "Action Items\n- old task\n")
+        self.summarised(client, "Action Items\n- new task\n")
+        assert [i["text"] for i in client.get("/api/action-items").json()["items"]] == ["new task"]
+
+    def test_qa_history_is_never_mined_for_actions(self, client):
+        main.save_llm_history("m1", "qa", "what next?", "- Priya will send the deck")
+        assert client.get("/api/action-items").json()["items"] == []
+
+    def test_no_summaries_means_an_empty_list(self, client):
+        client.post("/transcript", json={"meeting_id": "m1", "items": [item("hello")]})
+        assert client.get("/api/action-items").json()["items"] == []
+
+
+# --------------------------------------------------------------------------- #
 # extension packaging
 #
 # The zip is stamped with the origin that served it, so these guard the one

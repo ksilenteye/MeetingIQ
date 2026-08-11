@@ -97,7 +97,10 @@
   const DEBUG_KEY = 'meetTranscriptDebug';
   const LOCAL_LINES_KEY = 'meetTranscriptLocalLines';
   /** `[jsname]` matches a large slice of Meet's DOM; only scan it as a last resort. */
-  const WIDE_POOL_CAP = 80;
+  const WIDE_POOL_CAP = 400;
+  /** Bounds for the cheap textContent pre-filter on the wide pool. */
+  const WIDE_MIN_TEXT = 12;
+  const WIDE_MAX_TEXT = 4000;
   const REBIND_LOG_CAP = 100;
 
   /** @type {boolean} */
@@ -261,10 +264,26 @@
 
     consume(queryPool('[aria-live="polite"], [aria-live="assertive"]'));
     consume(queryPool('[role="log"], [role="status"]'));
+    // Meet no longer marks the caption box as a live region. Measured on a live
+    // call: the entire page had two elements matching the pools above, and both
+    // were notification surfaces. The caption text sits in an attribute-less
+    // div two levels under a role="region" wrapper, which is the only stable
+    // handle left. Binding that ancestor is also sturdier than the text node,
+    // which Meet swaps rather than edits — and the observer is subtree:true, so
+    // descendant changes still fire.
+    consume(queryPool('[role="region"]'));
 
     const haveViable = scored.some((c) => !c.notification && c.score >= H.MIN_ACCEPT_SCORE);
     if (!haveViable) {
-      consume(queryPool('[jsname], [data-message-text], [data-message-id]').slice(0, WIDE_POOL_CAP));
+      // Filter on textContent (which forces no layout) *before* capping. The old
+      // code sliced the raw pool in document order, and the caption box was
+      // measured at index 484 of 538 — the cap of 80 never came close to it, so
+      // the fallback could not rescue a missed caption box either.
+      const pool = queryPool('[jsname], [data-message-text], [data-message-id]').filter((el) => {
+        const len = (el.textContent || '').trim().length;
+        return len >= WIDE_MIN_TEXT && len <= WIDE_MAX_TEXT;
+      });
+      consume(pool.slice(0, WIDE_POOL_CAP));
     }
     return scored;
   }
@@ -487,11 +506,17 @@
     if (captionRoot) {
       const attached = isAttached(captionRoot);
       let entry = candidates.find((c) => c.el === captionRoot);
+      // Still in the pool? Then it is a real rival and the switch margin
+      // applies. Absent from it means no selector reaches this element any
+      // more — re-score it so capture continues, but tell the arbiter not to
+      // defend it against a candidate discovery *can* still see.
+      const discoverable = Boolean(entry);
       if (!entry && attached) entry = describeAndScore(captionRoot);
       bound = {
         key: keyFor(captionRoot),
         score: entry ? entry.score : H.DISQUALIFIED,
         attached,
+        discoverable,
       };
     }
 

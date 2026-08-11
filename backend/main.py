@@ -12,6 +12,7 @@ import threading
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -19,7 +20,8 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from llm.registry import list_providers
@@ -116,6 +118,15 @@ db_lock = threading.Lock()
 # deployment never needs its URL hardcoded anywhere.
 EXTENSION_DIR = BASE_DIR.parent / "extension"
 EXTENSION_ZIP_NAME = "meetingiq-extension.zip"
+
+# Served from the repo root rather than static/, so the landing page keeps
+# working on a deployment that ships without the video: the route 404s and the
+# player falls back to its note instead of the mount refusing to start.
+DEMO_VIDEO = BASE_DIR.parent / "DEMO.mp4"
+
+# The two pages are read per request by their route handlers so `uvicorn --reload`
+# picks up markup edits; only the css/js they pull in is served from here.
+app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 _db: Optional[sqlite3.Connection] = None
 # guards the one-time connect only; never held while db_lock is, so the two
@@ -679,12 +690,48 @@ def get_recent_transcripts(meeting_id: str, limit: int = 200) -> List[Dict[str, 
     ]
 
 
+def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+    """
+    Lenient ISO-8601 parse for `ts_iso`, which is whatever the client sent.
+
+    The extension sends `new Date().toISOString()` (UTC, trailing "Z"), but
+    /transcript accepts any string, so a hand-rolled POST or an older capture can
+    put anything in the column. Returning None instead of raising keeps one bad
+    row from blanking a whole meeting's duration.
+    """
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _span_seconds(first_ts: Optional[str], last_ts: Optional[str]) -> int:
+    """Wall-clock seconds a meeting's captions span, 0 when un-derivable."""
+    start, end = _parse_iso(first_ts), _parse_iso(last_ts)
+    if not start or not end:
+        return 0
+    return max(0, int((end - start).total_seconds()))
+
+
 def list_meetings(limit: int = 100) -> List[Dict[str, Any]]:
     cap = max(1, min(limit, 1000))
     with db_lock:
         cur = get_db().execute(
             """
-            SELECT meeting_id, COUNT(*) AS item_count, MAX(created_at) AS last_seen
+            SELECT meeting_id,
+                   COUNT(*) AS item_count,
+                   COUNT(DISTINCT speaker) AS speaker_count,
+                   MIN(ts_iso) AS first_ts,
+                   MAX(ts_iso) AS last_ts,
+                   MAX(created_at) AS last_seen
             FROM transcripts
             GROUP BY meeting_id
             ORDER BY MAX(id) DESC
@@ -693,11 +740,36 @@ def list_meetings(limit: int = 100) -> List[Dict[str, Any]]:
             (cap,),
         )
         rows = cur.fetchall()
+        # Speaker names for the participant stack. Fetched per page of meetings
+        # rather than for the whole table: a placeholder list is built from the
+        # ids just returned, so the scan stays proportional to what is displayed.
+        ids = [r["meeting_id"] for r in rows]
+        speakers_by_meeting: Dict[str, List[str]] = {mid: [] for mid in ids}
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            speaker_rows = get_db().execute(
+                f"""
+                SELECT meeting_id, speaker, COUNT(*) AS lines
+                FROM transcripts
+                WHERE meeting_id IN ({placeholders})
+                GROUP BY meeting_id, speaker
+                ORDER BY lines DESC
+                """,
+                ids,
+            ).fetchall()
+            for sr in speaker_rows:
+                speakers_by_meeting[sr["meeting_id"]].append(sr["speaker"])
+
     return [
         {
             "meeting_id": r["meeting_id"],
             "item_count": r["item_count"],
             "last_seen": r["last_seen"],
+            "started_at": r["first_ts"],
+            "ended_at": r["last_ts"],
+            "duration_seconds": _span_seconds(r["first_ts"], r["last_ts"]),
+            "speaker_count": r["speaker_count"],
+            "speakers": speakers_by_meeting.get(r["meeting_id"], []),
         }
         for r in rows
     ]
@@ -745,6 +817,194 @@ def get_llm_history(meeting_id: str, limit: int = 100) -> List[Dict[str, Any]]:
             row["used_llm"] = bool(row["used_llm"])
         out.append(row)
     return out
+
+
+def overview_stats() -> Dict[str, Any]:
+    """
+    Aggregates behind the dashboard's stat tiles.
+
+    Every number here is counted from what is actually in the database — there is
+    no modelled "time saved" or "accuracy" figure, because nothing in this system
+    measures either. `captured_seconds` sums each meeting's own caption span, so
+    two meetings that overlap in wall-clock time still count once each.
+    """
+    with db_lock:
+        totals = get_db().execute(
+            """
+            SELECT COUNT(*) AS lines,
+                   COUNT(DISTINCT meeting_id) AS meetings,
+                   COUNT(DISTINCT speaker) AS speakers
+            FROM transcripts
+            """
+        ).fetchone()
+        spans = get_db().execute(
+            """
+            SELECT MIN(ts_iso) AS first_ts, MAX(ts_iso) AS last_ts
+            FROM transcripts
+            GROUP BY meeting_id
+            """
+        ).fetchall()
+        ai = get_db().execute(
+            """
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN used_llm = 1 THEN 1 ELSE 0 END) AS via_llm,
+                   SUM(CASE WHEN action = 'summarize' THEN 1 ELSE 0 END) AS summaries
+            FROM llm_history
+            """
+        ).fetchone()
+        # counted from the table rather than assistant_runtime["stats"], which
+        # only tallies what this process ingested since it started
+        chunks = get_db().execute("SELECT COUNT(*) AS n FROM rag_chunks").fetchone()
+
+    captured = sum(_span_seconds(r["first_ts"], r["last_ts"]) for r in spans)
+    return {
+        "total_meetings": totals["meetings"] or 0,
+        "total_lines": totals["lines"] or 0,
+        "total_speakers": totals["speakers"] or 0,
+        "captured_seconds": captured,
+        "ai_actions": ai["total"] or 0,
+        "ai_actions_via_llm": ai["via_llm"] or 0,
+        "summaries": ai["summaries"] or 0,
+        "assistant_ready": bool(assistant_runtime and assistant_runtime.get("ready")),
+        "indexed_chunks": chunks["n"] or 0,
+    }
+
+
+def insights(meeting_id: Optional[str] = None) -> Dict[str, Any]:
+    """Talk-time split, daily capture volume and provider mix, all from stored rows."""
+    where, params = ("WHERE meeting_id = ?", [meeting_id]) if meeting_id else ("", [])
+    with db_lock:
+        speaker_rows = get_db().execute(
+            f"""
+            SELECT speaker,
+                   COUNT(*) AS lines,
+                   SUM(LENGTH(text) - LENGTH(REPLACE(text, ' ', '')) + 1) AS words
+            FROM transcripts
+            {where}
+            GROUP BY speaker
+            ORDER BY lines DESC
+            LIMIT 12
+            """,
+            params,
+        ).fetchall()
+        activity_rows = get_db().execute(
+            f"""
+            SELECT DATE(created_at) AS day, COUNT(*) AS lines
+            FROM transcripts
+            {where}
+            GROUP BY DATE(created_at)
+            ORDER BY day DESC
+            LIMIT 14
+            """,
+            params,
+        ).fetchall()
+        provider_rows = get_db().execute(
+            f"""
+            SELECT COALESCE(provider, 'unknown') AS provider,
+                   action,
+                   COUNT(*) AS runs
+            FROM llm_history
+            {where}
+            GROUP BY provider, action
+            ORDER BY runs DESC
+            """,
+            params,
+        ).fetchall()
+
+    total_words = sum((r["words"] or 0) for r in speaker_rows) or 1
+    return {
+        "meeting_id": meeting_id,
+        "speakers": [
+            {
+                "speaker": r["speaker"],
+                "lines": r["lines"],
+                "words": r["words"] or 0,
+                "share": round(100 * (r["words"] or 0) / total_words, 1),
+            }
+            for r in speaker_rows
+        ],
+        # reversed so the chart reads left-to-right oldest-to-newest
+        "activity": [{"day": r["day"], "lines": r["lines"]} for r in reversed(activity_rows)],
+        "providers": [
+            {"provider": r["provider"], "action": r["action"], "runs": r["runs"]}
+            for r in provider_rows
+        ],
+    }
+
+
+# A summary bullet is treated as an action item when it sits under an "action
+# items" heading, or reads like an assignment. Deliberately conservative: this is
+# extraction from text an LLM already wrote, not a second inference pass.
+_ACTION_HEADING_RE = re.compile(r"^\s*[#*\-\s]*(action items?|next steps?|todos?|follow[- ]ups?)\b[:\s]*$", re.I)
+_OTHER_HEADING_RE = re.compile(r"^\s*[#*]*\s*[A-Z][A-Za-z /&]{2,40}:?\s*$")
+_BULLET_RE = re.compile(r"^\s*(?:[-*•‣]|\d+[.)])\s+(.*\S)\s*$")
+_ACTION_VERB_RE = re.compile(
+    r"\b(will|should|must|need to|needs to|to do|follow up|assign|owns?|prepare|send|"
+    r"schedule|review|draft|share|create|update|fix|ship|deliver|confirm|investigate)\b",
+    re.I,
+)
+_OWNER_RE = re.compile(r"^\s*(?:\*\*)?([A-Z][\w.'-]{1,20})(?:\*\*)?\s*(?:—|-|:|will|to)\s")
+
+
+def extract_action_items(meeting_id: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
+    """
+    Pull action items out of summaries already stored in `llm_history`.
+
+    Nothing generates action items on its own — they exist only where a
+    summarize run produced them, so an empty list means "no summaries yet",
+    not "no action items". Newest summary per meeting wins so a re-summarised
+    meeting does not show both generations at once.
+    """
+    where, params = ("WHERE meeting_id = ?", [meeting_id]) if meeting_id else ("", [])
+    with db_lock:
+        rows = get_db().execute(
+            f"""
+            SELECT meeting_id, result, created_at
+            FROM llm_history
+            {where}
+            {"AND" if where else "WHERE"} action = 'summarize'
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            [*params, max(1, min(limit, 500))],
+        ).fetchall()
+
+    items: List[Dict[str, Any]] = []
+    seen_meetings: set[str] = set()
+    for row in rows:
+        if row["meeting_id"] in seen_meetings:
+            continue
+        seen_meetings.add(row["meeting_id"])
+        in_action_section = False
+        for line in (row["result"] or "").splitlines():
+            if _ACTION_HEADING_RE.match(line):
+                in_action_section = True
+                continue
+            bullet = _BULLET_RE.match(line)
+            if not bullet:
+                # a different heading closes the section; blank lines do not,
+                # since models routinely space out their bullet lists
+                if line.strip() and _OTHER_HEADING_RE.match(line):
+                    in_action_section = False
+                continue
+            text = bullet.group(1).strip()
+            if in_action_section:
+                source = "section"
+            elif _ACTION_VERB_RE.search(text):
+                source = "heuristic"
+            else:
+                continue
+            owner = _OWNER_RE.match(text)
+            items.append(
+                {
+                    "meeting_id": row["meeting_id"],
+                    "text": text,
+                    "owner": owner.group(1) if owner else None,
+                    "source": source,
+                    "created_at": row["created_at"],
+                }
+            )
+    return items
 
 
 class TranscriptHub:
@@ -974,13 +1234,34 @@ def health():
         # false means the deploy did not include ../extension, so the dashboard's
         # download button is dead — worth catching before a visitor finds it
         "extension_zip_available": EXTENSION_DIR.is_dir(),
+        "demo_video_available": DEMO_VIDEO.is_file(),
     }
 
 
 @app.get("/", response_class=HTMLResponse)
 def ui_root():
-    html_path = BASE_DIR / "static" / "index.html"
-    return html_path.read_text(encoding="utf-8")
+    """Landing page. The working dashboard moved to /app."""
+    return (BASE_DIR / "static" / "landing.html").read_text(encoding="utf-8")
+
+
+@app.get("/app", response_class=HTMLResponse)
+def ui_app():
+    return (BASE_DIR / "static" / "app.html").read_text(encoding="utf-8")
+
+
+@app.get("/demo.mp4")
+def demo_video():
+    """
+    The landing page's demo recording.
+
+    FileResponse answers Range requests, which is what lets the player seek
+    without refetching the file. The landing page still attaches the <video> on
+    click rather than preloading it, so visiting the page costs nothing for
+    anyone who does not watch.
+    """
+    if not DEMO_VIDEO.is_file():
+        raise HTTPException(status_code=404, detail="demo video not deployed")
+    return FileResponse(DEMO_VIDEO, media_type="video/mp4")
 
 
 @app.get("/api/extension.zip")
@@ -1016,6 +1297,21 @@ def api_transcripts(meeting_id: str, limit: int = 200):
 @app.get("/api/meetings")
 def api_meetings(limit: int = 100):
     return {"items": list_meetings(limit)}
+
+
+@app.get("/api/stats")
+def api_stats():
+    return overview_stats()
+
+
+@app.get("/api/insights")
+def api_insights(meeting_id: Optional[str] = None):
+    return insights(meeting_id)
+
+
+@app.get("/api/action-items")
+def api_action_items(meeting_id: Optional[str] = None, limit: int = 200):
+    return {"items": extract_action_items(meeting_id, limit)}
 
 
 @app.get("/api/llm/history")
