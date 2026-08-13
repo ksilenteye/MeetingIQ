@@ -3,6 +3,13 @@
 > **Real-time AI-powered meeting intelligence for Google Meet.**  
 > Capture live captions, ask questions, and get semantic answers — all from your browser, all on your machine.
 
+### 🔗 [**Live demo → meetingiq.onrender.com**](https://meetingiq.onrender.com/)
+
+Landing page at [`/`](https://meetingiq.onrender.com/), dashboard at [`/app`](https://meetingiq.onrender.com/app) — preloaded with demo meetings, so there is something to look at before you install anything.
+
+> Hosted on Render's free tier: the instance spins down when idle, so **the first request can take ~50 seconds**. Every one after that is instant. It runs the hash-fallback embedder (PyTorch does not fit in 512 MB), so semantic Q&A there is noticeably weaker than a local install — see **Deployment** below.
+
+![Live](https://img.shields.io/badge/demo-live-brightgreen?style=flat&logo=render&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688?style=flat&logo=fastapi&logoColor=white)
 ![Chrome MV3](https://img.shields.io/badge/Chrome-Manifest%20V3-4285F4?style=flat&logo=googlechrome&logoColor=white)
@@ -20,20 +27,55 @@ MeetingIQ silently captures every spoken word in a Google Meet session and makes
 |---|---|
 | 📡 **Live capture** | Chrome extension scrapes Google Meet captions in real time via `MutationObserver` |
 | 🎯 **Self-healing caption binding** | The caption box is discovered by scoring the DOM, not by fixed selectors — Meet's markup can change without breaking capture |
+| 🧹 **UI-chrome rejection** | Button labels, tooltips and screen-reader announcements are disqualified before they can be recorded as speech |
 | ⚡ **Instant broadcast** | New captions pushed to all open dashboard tabs over WebSocket — no polling |
 | 📥 **Offline-safe queue** | Batches survive service-worker shutdown and network outages; retried with exponential backoff |
 | 🤖 **Multi-provider LLM** | Summarize or ask questions using **OpenAI**, **Groq**, or **Gemini** — switchable per request |
 | 🧠 **Semantic RAG Q&A** | Questions answered from semantically retrieved chunks, filterable per meeting |
 | 💾 **Restart-safe memory** | Embeddings persisted to SQLite as float32 BLOBs — the vector index survives backend restarts |
 | 🔁 **Heuristic fallback** | Works without any API key using keyword-based summarise and Q&A |
+| 🖥️ **Built-in web UI** | Landing page at `/` and an 8-view dashboard at `/app` — vanilla HTML/CSS/JS, no build step, no framework |
+| 🔬 **Diagnostics in the popup** | Filter self-test, live binding state and a DOM probe — capture can be debugged without opening DevTools |
 
 ---
 
-## 🆕 What was updated in this revision
+## 🆕 What was updated
 
-The last released version worked, but lost captions, produced stub-sized RAG chunks, and had no tests. This revision fixes all three. Highlights:
+### Web interface — new
 
-### Capture reliability (extension)
+The project used to be an API with a single debug page. It now ships its own two-page front end, served by the same FastAPI process:
+
+- **`GET /`** — landing page: what the tool is, how capture works, real *load-unpacked* install steps, and a click-to-play demo recording.
+- **`GET /app`** — dashboard SPA with 8 views (Dashboard, Meetings, Summaries, Transcripts, Action Items, Insights, Settings, Help), hash-routed by toggling `[hidden]`.
+- **Three new read-model endpoints** — `/api/stats`, `/api/insights`, `/api/action-items`. Every number is a SQL aggregate over tables that already existed; nothing is modelled, estimated or cached.
+- **`/api/action-items` runs no inference.** It re-reads summaries an LLM already wrote and pulls bullets from *Action items* / *Next steps* headings, plus bullets that read like an assignment. An empty list means no summaries have been generated yet.
+- **No build step and no framework.** `theme.css` declares every shared component against surface/text variables it deliberately leaves unset; `landing.css` (light) and `app.css` (dark) fill them in. All untrusted caption text goes through `esc()` or `textContent` before it reaches the DOM.
+
+### Caption discovery on current Meet
+
+Capture was recording Meet's own interface — button labels and tooltips arriving as "speech", attributed to whoever spoke last. It turned out to be **four independent bugs, each one hiding the next**:
+
+1. **Meet UI outscored the caption box.** The sharing and device panels scored 129 against the caption box's 137, and the accessibility announcer was eligible at 119. Fixed by extending `UI_CONTROL_LABELS`, bounding the notification patterns (the old device-picker pattern stopped at the first `)` and so missed `Microphone (2- Realtek(R) Audio)`), and adding a structural rule: **a caption box never contains two whole-line button labels.**
+2. **The collector never found the caption box at all.** Meet no longer marks captions as a live region — the whole page had two `[aria-live]`/`[role=log|status]` elements and both were notification toasts. The caption text is an attribute-less `div` under `div role="region"`. Fixed by adding `[role="region"]` to the narrow candidate pool.
+3. **The wide fallback was capped in document order.** It took `.slice(0, 80)` of a **538-element** `[jsname]` pool — and the caption box sat at **index 484**. Fixed with a `textContent` length pre-filter (which forces no layout) ahead of a 400-element cap.
+4. **A stale root was protected by the switch margin.** The bound element was still attached but matched no selector, so it was re-scored and defended: the real caption box had to beat it by 12 points across 3 consecutive ticks. The arbiter now rebinds immediately when a bound root is no longer *discoverable* — a root discovery can't find is a leftover, not a rival.
+
+Each collector and arbiter fix was verified to fail against the reverted code before being kept.
+
+### Diagnostics in the extension popup
+
+Capture failures used to be invisible without DevTools. The popup now reports, on the active tab:
+
+- a **self-test** of the caption filters, run against the same `caption-heuristics.js` Chrome actually loaded — not the copy on disk;
+- the **currently bound root**, its score, whether it is the top-scoring candidate, whether the wide fallback is in use, and the reason for the last rebind;
+- **Find caption element** — a probe that walks the DOM backwards from visible text and reports the element's markup, its ancestor chain and its index in the `[jsname]` pool;
+- **Copy diagnostics** / **Copy probe**, so a failure can be pasted somewhere useful.
+
+---
+
+*The sections below cover the earlier revision, which fixed lost captions, stub-sized RAG chunks and the complete absence of tests.*
+
+### Capture reliability
 
 - **New `caption-heuristics.js`** — caption-root discovery is now a scored, testable module instead of inline guesswork in `content.js`. Meet's notification toasts carry the same `aria-live` / `role=status` markup as the caption box and used to win the scoring contest (a toast beat the caption box in **28 of 28** measured long-single-speaker frames). Toasts are now *disqualified*, not merely penalised.
 - **Corroborated rebinding** — an attached caption root is only abandoned when a challenger beats it by a margin on 3 consecutive evaluations, and the old root keeps capturing throughout. A bad scoring pass can no longer tear down a working capture; only actual DOM detachment triggers an immediate rebind. Meet's caption DOM keeps no history, so every second spent observing the wrong node was permanent data loss.
@@ -79,7 +121,14 @@ The last released version worked, but lost captions, produced stub-sized RAG chu
 │  ├── POST /transcript      → SQLite + WebSocket broadcast   │
 │  ├── POST /api/llm/action  → LLM service layer              │
 │  ├── POST /api/assistant/* → RAG pipeline                   │
+│  ├── GET  /api/stats|insights|action-items → read models    │
+│  ├── GET  / and /app       → static front end (below)       │
 │  └── WS   /ws/transcripts  → TranscriptHub                  │
+│                                                             │
+│  Front end  backend/static/   (no build step, no framework) │
+│  ├── landing.html + landing.css   light theme, marketing    │
+│  ├── app.html     + app.css       dark theme, 8-view SPA    │
+│  └── theme.css    shared tokens, both palettes fill them in │
 │                                                             │
 │  LLM Service Layer          Meeting Assistant Pipeline      │
 │  ├── service.py             ├── Processor (read/clean/seal) │
@@ -100,6 +149,10 @@ The last released version worked, but lost captions, produced stub-sized RAG chu
 
 ```
 MeetingIQ/
+├── render.yaml                       # Render blueprint — see Deployment below
+├── DEMO.mp4                          # Landing-page recording, served at /demo.mp4
+├── transcript.md                     # 5-minute demo script
+├── CLAUDE.md                         # Deep implementation notes and gotchas
 ├── backend/
 │   ├── main.py                    # FastAPI app — endpoints, DB, RAG lifecycle
 │   ├── requirements.txt
@@ -142,9 +195,10 @@ MeetingIQ/
     ├── caption-heuristics.js      # Caption-root scoring + rebind arbiter
     ├── content.js                 # MutationObserver caption scraper
     ├── background.js              # Service worker — persistent queue + retry
-    ├── popup.html / popup.js      # On/off toggle
+    ├── popup.html / popup.js      # On/off toggle + capture diagnostics
     ├── styles/inject.css
     └── tests/                     # 137 node --test tests
+        └── score-block.mjs        # CLI scorer — not a test, see Development
 ```
 
 Manifest load order is `utils.js` → `caption-heuristics.js` → `content.js`, and it matters: `content.js` hard-depends on the heuristics module and stays idle with a `console.error` if it is missing.
@@ -152,6 +206,8 @@ Manifest load order is `utils.js` → `caption-heuristics.js` → `content.js`, 
 ---
 
 ## 🚀 How to run this project
+
+> Just want to look around? The [hosted demo](https://meetingiq.onrender.com/app) already has meetings loaded, and its "Get started" panel serves an extension zip preconfigured for that origin. Run locally if you want real semantic retrieval or your own meetings staying on your machine.
 
 ### Prerequisites
 
@@ -213,6 +269,8 @@ There is no build step. After editing extension files, hit **Reload** on the ext
 ### 4. Start a Google Meet
 
 Open any Google Meet and turn on **Live captions** (the `CC` button) — nothing is captured without them. Captions flow to the dashboard automatically.
+
+> **Nothing appearing, or Meet's own button labels showing up as speech?** Click the 🎙️ icon while the Meet tab is focused — the popup reports the caption filters, what the extension is currently bound to, and a DOM probe that finds the caption box. See [Diagnosing capture from the popup](#diagnosing-capture-from-the-popup).
 
 ### 5. Ask questions
 
@@ -412,22 +470,38 @@ All meeting-assistant settings are controlled via environment variables:
 
 ## 🔌 Extension Settings
 
-Click the 🎙️ icon to **enable / disable** capture — that is the only setting in the popup.
+Click the 🎙️ icon to **enable / disable** capture. That is the only *setting* — everything else in the popup is diagnostics.
 
-The backend URL is **hardcoded** as `API_URL` in `background.js` and pinned again in `manifest.json` under `host_permissions` (localhost / 127.0.0.1 on port 8000). Changing host or port means editing **both** files and reloading the extension.
+The backend URL is **hardcoded** as `API_URL` in `background.js` and pinned again in `manifest.json` under `host_permissions` (localhost / 127.0.0.1 on port 8000). Changing host or port means editing **both** files and reloading the extension. The zip built by `GET /api/extension.zip` rewrites both to the server's own origin, so a downloaded copy needs no edits.
 
 Badge states:
 
 - *(empty)* — streaming OK
 - **`!`** — last batch failed after 6 retries (check the backend is running)
 
-Debugging capture, from the extension's DevTools context:
+### Diagnosing capture from the popup
+
+Open the popup **while the Meet tab is focused**. It reads the live page through `chrome.scripting.executeScript`, so everything it shows describes that tab right now:
+
+| Panel | What it tells you |
+|---|---|
+| **Caption filters** | Self-test of the UI-chrome filters, run against the `caption-heuristics.js` Chrome actually loaded. All ✓ means the shipped filters are the fixed ones — a ✗ here means you are running a stale copy, so reload the extension card. |
+| **Bound on this tab** | The bound root, its score, the top candidates, whether the bound root *is* the top candidate, whether the wide fallback is in use, and the reason for the last rebind. |
+| **Locate the caption box** | **Find caption element** walks the DOM backwards from visible caption text and prints its markup, ancestor chain, and index in the `[jsname]` pool. Use it when the bound-state panel says nothing viable was found. |
+
+Reading it: healthy capture is *bound root = top candidate*, score comfortably above the accept floor, and recent caption text in the sample. `bound to something else — stale binding` means a rebind is overdue. `last rebind: bound-root-undiscoverable → …` is the recovery path working as designed.
+
+**Copy diagnostics** and **Copy probe** put the whole report on the clipboard.
+
+The DevTools API is still there if you want the raw stream, from the extension's context on the Meet tab:
 
 ```js
 __meetTranscript.enableDebug()   // log every rebind decision + score breakdowns
 __meetTranscript.rebinds()       // last 100 rebinds (recorded even with debug off)
 __meetTranscript.candidates()    // score the current page right now
 ```
+
+> These live in the extension's **isolated world**. Typing them in the page console returns `undefined` — pick the extension's context in the DevTools context dropdown first.
 
 ---
 
@@ -448,6 +522,17 @@ node --test extension/tests/*.test.mjs                 # 137 tests, no deps
 Nothing here needs an API key or a network connection. The extension tests have no dependencies either — caption-root selection runs against fake elements, and `content.js` itself is booted in a vm with a fake page, fake `chrome.*` and a virtual clock, so debounce/throttle timings run deterministically. There is no jsdom and no browser involved.
 
 > `node --test extension/tests/` (directory form) fails on Node 24 — pass the file glob as shown.
+
+### Scoring a leak without a live Meet
+
+When Meet interface text turns up in your transcript, paste the block into the scorer instead of guessing at a pattern:
+
+```bash
+printf 'Add others\nStop sharing\n' | node extension/tests/score-block.mjs
+node extension/tests/score-block.mjs "Your microphone is on"
+```
+
+It prints the verdict (`DISQUALIFIED` / `ELIGIBLE`), the score, a per-line flag breakdown, and whether the block would have been emitted. `notification: true` is the verdict that matters — it is a hard disqualification independent of layout, whereas the absolute score assumes caption-sized bottom-centre geometry and is only indicative. Anything that scores `ELIGIBLE` while reading as interface text needs a new entry in `UI_CONTROL_LABELS` or `NOTIFICATION_LINE_PATTERNS`, plus a regression test in both directions — the filter must reject the chrome *and* still keep real speech containing the same words.
 
 ### Running with auto-reload
 
@@ -538,12 +623,39 @@ pytest>=8.0.0
 
 ---
 
+## ☁️ Deployment
+
+Live at **<https://meetingiq.onrender.com/>**.
+
+`render.yaml` is a Render blueprint — push to `main` and the service rebuilds (`autoDeployTrigger: commit`). Four things about it are load-bearing:
+
+| Setting | Why it is not a preference |
+|---|---|
+| `--workers 1`, `numInstances: 1` | The VectorDB is in-memory per process and `assistant_ingest_loop()` is a single asyncio task. Two workers would double-ingest every transcript and race the `rag_state` cursor. |
+| `rootDir: backend` | Makes the CWD `backend/`, which `main.py`'s flat `from llm.registry import …` requires. Render still clones the whole repo, so `../extension/` remains on disk for `GET /api/extension.zip`. |
+| `--forwarded-allow-ips='*'` | uvicorn trusts only loopback by default and Render's proxy is not loopback, so without this `request.url.scheme` stays `http` behind HTTPS. |
+| **No LLM API keys in `envVars`** | `resolve_api_key()` falls back to `OPENAI_API_KEY` / `GROQ_API_KEY` / `GOOGLE_API_KEY` when a request omits a key. Setting any of them converts bring-your-own-key into *the owner is billed for every anonymous visitor*. |
+
+Things that trip up a first deploy:
+
+- **`backend/static/` must be committed.** `StaticFiles(directory=…)` raises at *import* time if the directory is missing, so a missing front end is not a 404 — it is a service that will not boot.
+- **`DEMO.mp4` is optional.** `/demo.mp4` returns 404 when it is absent and the landing page swaps the player for a link to `/app`. `/health` reports `demo_video_available` so you can check without hunting for a dead play button.
+- **The disk is ephemeral.** `backend/transcripts.db` ships in the repo and re-seeds the demo meetings on every cold start; anything captured live is lost on the next spin-down. Deliberate for a portfolio demo — not a fit for real meetings.
+- **`No module named 'google.generativeai'` is a local-only error.** The package is in `requirements.txt` and Render's build installs it; locally you need `pip install -r requirements.txt` in the venv you are actually running.
+- **Free tier is 512 MB.** `sentence-transformers` pulls PyTorch and will OOM it, so the hosted instance runs the hash-fallback embedder and its semantic Q&A is materially worse than a local install. `requirements.txt` documents this at the point of temptation.
+
+Anyone visiting the deployed landing page can download a preconfigured extension from `GET /api/extension.zip` — the server rewrites `API_URL` and `host_permissions` to its own origin as it builds the archive, so no URL is ever committed.
+
+---
+
 ## 🗺️ Roadmap
 
 - [ ] Streaming LLM responses via WebSocket (server-sent events)
 - [ ] Configurable backend URL in the extension popup
 - [ ] Async embedding queue for large transcript backlogs
 - [x] Speaker talk-time and capture-volume analytics in the dashboard
+- [x] Landing page and multi-view dashboard served by the backend
+- [x] Capture diagnostics surfaced in the extension popup, no DevTools required
 - [ ] Export transcript + summary as PDF / DOCX
 - [ ] Docker Compose setup for one-command deployment
 - [ ] Support for additional LLM providers
@@ -569,6 +681,12 @@ Please open an issue first for large changes.
 MIT — see [LICENSE](LICENSE) for details.
 
 ---
+
+<p align="center">
+  <a href="https://meetingiq.onrender.com/"><strong>Live demo</strong></a> ·
+  <a href="CLAUDE.md">Implementation notes</a> ·
+  <a href="transcript.md">Demo script</a>
+</p>
 
 <p align="center">
   Built with FastAPI · sentence-transformers · FAISS · Chrome MV3
